@@ -61,7 +61,10 @@ room "id" { ... }
 thing "id" { ... }
 verb "id" { ... }
 event "id" { ... }
+include "rooms.lua"
 ```
+
+`include` loads a project-local Lua file relative to the including file. Includes must stay inside the game directory, are loaded at most once, and cyclic includes are rejected. Keep `.luarc.json` in sync with DSL globals.
 
 Thing matching ignores one leading article (`the`, `a`, or `an`) and normalizes whitespace/case. Do not add article-prefixed aliases such as `"the key"` unless a future parser feature explicitly needs them.
 
@@ -134,7 +137,7 @@ Lua callbacks can use `game.random(min, max)` for deterministic inclusive intege
 
 Lua callbacks can use `game.visited(room_id)` for return-visit logic. Visited room ids live in `GameState.visited_rooms` and must remain serializable.
 
-The repo has `.luarc.json` so LuaLS recognizes those globals. Update it if new DSL globals are added.
+The repo has `.luarc.json` so LuaLS recognizes DSL globals. Update it if new DSL globals are added.
 
 ## Transcript Format
 

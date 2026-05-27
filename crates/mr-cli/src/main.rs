@@ -325,7 +325,7 @@ You can see a gardener.
 const TEMPLATE_LUARC: &str = r#"{
   "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
   "runtime.version": "Lua 5.4",
-  "diagnostics.globals": ["game", "room", "thing", "verb", "event"]
+  "diagnostics.globals": ["game", "room", "thing", "verb", "event", "include"]
 }
 "#;
 

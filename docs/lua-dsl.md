@@ -2,6 +2,18 @@
 
 Moonroom game files are Lua scripts that register story data through a small set of global DSL functions.
 
+Small games can keep all definitions in `game.lua`. Larger games can split definitions across project-local Lua files with `include`:
+
+```lua
+include "rooms.lua"
+include "things.lua"
+include "dialogue.lua"
+include "verbs.lua"
+include "events.lua"
+```
+
+Included paths are relative to the file that calls `include`, must stay inside the game directory, and are loaded at most once. Cyclic includes are rejected.
+
 ## Game
 
 ```lua

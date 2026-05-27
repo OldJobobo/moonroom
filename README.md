@@ -106,6 +106,16 @@ thing "brass_key" {
 }
 ```
 
+Larger games can split definitions into project-local files:
+
+```lua
+include "rooms.lua"
+include "things.lua"
+include "dialogue.lua"
+include "verbs.lua"
+include "events.lua"
+```
+
 Moonroom matches one leading article in object phrases, so `take key`, `take the key`, and `take a brass key` resolve to the same object when the aliases match.
 
 ## Project Layout

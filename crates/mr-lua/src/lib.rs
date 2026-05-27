@@ -24,6 +24,9 @@ pub enum LuaLoadError {
     #[error("failed to load Lua file '{path}': {source}")]
     Lua { path: PathBuf, source: mlua::Error },
 
+    #[error("included Lua file '{include}' escapes game directory '{root}'")]
+    IncludeEscapesRoot { include: PathBuf, root: PathBuf },
+
     #[error(transparent)]
     Game(#[from] GameError),
 }
@@ -65,6 +68,9 @@ pub enum LuaRunError {
 struct LoadState {
     world: World,
     callbacks: CallbackRegistry,
+    include_root: PathBuf,
+    include_stack: Vec<PathBuf>,
+    included_files: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -706,26 +712,29 @@ impl LuaGame {
 
 fn load_game_data(path: impl AsRef<Path>) -> Result<LoadedGame, LuaLoadError> {
     let path = path.as_ref();
-    let source = fs::read_to_string(path).map_err(|source| LuaLoadError::Io {
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let root = fs::canonicalize(root).map_err(|source| LuaLoadError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let entrypoint = fs::canonicalize(path).map_err(|source| LuaLoadError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    ensure_path_in_root(&root, &entrypoint)?;
 
     let lua = Lua::new();
-    let state = Rc::new(RefCell::new(LoadState::default()));
+    let state = Rc::new(RefCell::new(LoadState {
+        include_root: root,
+        ..LoadState::default()
+    }));
 
     register_dsl(&lua, Rc::clone(&state)).map_err(|source| LuaLoadError::Lua {
-        path: path.to_path_buf(),
+        path: entrypoint.clone(),
         source,
     })?;
 
-    lua.load(&source)
-        .set_name(path.display().to_string())
-        .exec()
-        .map_err(|source| LuaLoadError::Lua {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    load_lua_file(&lua, Rc::clone(&state), entrypoint)?;
 
     let mut state = state.borrow_mut();
     let world = std::mem::take(&mut state.world);
@@ -741,6 +750,12 @@ fn load_game_data(path: impl AsRef<Path>) -> Result<LoadedGame, LuaLoadError> {
 
 fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
     let globals = lua.globals();
+
+    let include_state = Rc::clone(&state);
+    let include = lua.create_function(move |lua, relative_path: String| {
+        include_lua_file(lua, Rc::clone(&include_state), &relative_path)
+    })?;
+    globals.set("include", include)?;
 
     let game_state = Rc::clone(&state);
     let game = lua.create_function(move |lua, table: Table| {
@@ -934,6 +949,97 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
     globals.set("thing", thing)?;
 
     Ok(())
+}
+
+fn include_lua_file(
+    lua: &Lua,
+    state: Rc<RefCell<LoadState>>,
+    relative_path: &str,
+) -> mlua::Result<()> {
+    let path = {
+        let state = state.borrow();
+        if Path::new(relative_path).is_absolute() {
+            return Err(mlua::Error::runtime(
+                "include path must be relative to the game directory",
+            ));
+        }
+
+        let Some(base) = state.include_stack.last().and_then(|path| path.parent()) else {
+            return Err(mlua::Error::runtime(
+                "include called without an active Lua file",
+            ));
+        };
+
+        base.join(relative_path)
+    };
+
+    let path = fs::canonicalize(&path).map_err(|source| {
+        mlua::Error::runtime(format!(
+            "failed to read included Lua file '{}': {source}",
+            path.display()
+        ))
+    })?;
+
+    {
+        let state = state.borrow();
+        ensure_path_in_root(&state.include_root, &path).map_err(|err| {
+            mlua::Error::runtime(format!("failed to include '{}': {err}", path.display()))
+        })?;
+
+        if state.include_stack.contains(&path) {
+            return Err(mlua::Error::runtime(format!(
+                "cyclic include of '{}'",
+                path.display()
+            )));
+        }
+    }
+
+    load_lua_file(lua, state, path).map_err(mlua::Error::external)
+}
+
+fn load_lua_file(
+    lua: &Lua,
+    state: Rc<RefCell<LoadState>>,
+    path: PathBuf,
+) -> Result<(), LuaLoadError> {
+    {
+        let mut state = state.borrow_mut();
+
+        if !state.included_files.insert(path.clone()) {
+            return Ok(());
+        }
+
+        state.include_stack.push(path.clone());
+    }
+
+    let result = (|| {
+        let source = fs::read_to_string(&path).map_err(|source| LuaLoadError::Io {
+            path: path.clone(),
+            source,
+        })?;
+
+        lua.load(&source)
+            .set_name(path.display().to_string())
+            .exec()
+            .map_err(|source| LuaLoadError::Lua {
+                path: path.clone(),
+                source,
+            })
+    })();
+
+    state.borrow_mut().include_stack.pop();
+    result
+}
+
+fn ensure_path_in_root(root: &Path, path: &Path) -> Result<(), LuaLoadError> {
+    if path.starts_with(root) {
+        return Ok(());
+    }
+
+    Err(LuaLoadError::IncludeEscapesRoot {
+        include: path.to_path_buf(),
+        root: root.to_path_buf(),
+    })
 }
 
 fn table_to_exit_map(table: Table) -> mlua::Result<BTreeMap<String, Exit>> {
@@ -1157,5 +1263,82 @@ room "north_room" {
         let opening = game.opening().expect("opening renders");
 
         assert!(opening.contains("Paths: east, north."));
+    }
+
+    #[test]
+    fn game_can_include_project_local_lua_files() {
+        let game_dir =
+            std::env::temp_dir().join(format!("moonroom-include-test-{}", process::id()));
+        fs::create_dir_all(&game_dir).expect("test game dir should create");
+        fs::write(
+            game_dir.join("game.lua"),
+            r#"
+game {
+  title = "Include Test",
+  start = "start"
+}
+
+include "rooms.lua"
+include "things.lua"
+"#,
+        )
+        .expect("entrypoint should write");
+        fs::write(
+            game_dir.join("rooms.lua"),
+            r#"
+room "start" {
+  name = "Start",
+  desc = "A split room."
+}
+"#,
+        )
+        .expect("rooms file should write");
+        fs::write(
+            game_dir.join("things.lua"),
+            r#"
+thing "coin" {
+  name = "coin",
+  aliases = { "coin" },
+  location = "start",
+  portable = true
+}
+"#,
+        )
+        .expect("things file should write");
+
+        let game = LuaGame::load(game_dir.join("game.lua")).expect("split game should load");
+
+        assert!(game.game.world().rooms.contains_key("start"));
+        assert!(game.game.world().things.contains_key("coin"));
+    }
+
+    #[test]
+    fn include_rejects_files_outside_game_directory() {
+        let game_dir =
+            std::env::temp_dir().join(format!("moonroom-include-escape-test-{}", process::id()));
+        fs::create_dir_all(&game_dir).expect("test game dir should create");
+        fs::write(
+            std::env::temp_dir().join("moonroom-outside.lua"),
+            r#"room "outside" { name = "Outside", desc = "Outside." }"#,
+        )
+        .expect("outside file should write");
+        fs::write(
+            game_dir.join("game.lua"),
+            r#"
+game {
+  title = "Escape Test",
+  start = "outside"
+}
+
+include "../moonroom-outside.lua"
+"#,
+        )
+        .expect("entrypoint should write");
+
+        let Err(err) = LuaGame::load(game_dir.join("game.lua")) else {
+            panic!("include should fail");
+        };
+
+        assert!(err.to_string().contains("escapes game directory"));
     }
 }

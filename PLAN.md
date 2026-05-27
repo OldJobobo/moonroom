@@ -478,9 +478,40 @@ Once that works, add transcript tests before making the parser more ambitious.
 
 ## Expanded Roadmap
 
-The original milestone plan gets Moonroom to a playable, scriptable parser-fiction engine. The next phase should turn it into a stronger authoring platform: better parser ergonomics, richer world state, safer save files, and tooling that helps authors understand their games before players do.
+The original milestone plan gets Moonroom to a playable, scriptable parser-fiction engine. The next phase should turn it into a stronger authoring platform: scalable project structure, better parser ergonomics, richer world state, safer save files, and tooling that helps authors understand their games before players do.
 
-### Milestone 6: Parser Quality
+### Milestone 6: Project Structure
+
+```text
+multi-file game loading from game.lua as the entrypoint
+project-local include helper for rooms.lua, things.lua, verbs.lua, dialogue.lua, and events.lua
+safe path handling so included files cannot escape the game directory
+clear Lua source errors that preserve the included file path
+cycle/duplicate include behavior defined explicitly
+moonroom new can keep generating one-file games, with split-file templates later
+```
+
+Target:
+
+```lua
+-- game.lua
+game {
+  title = "The House Under Glass",
+  start = "foyer"
+}
+
+include "rooms.lua"
+include "things.lua"
+include "dialogue.lua"
+include "verbs.lua"
+include "events.lua"
+```
+
+Small games should still be able to keep everything in `game.lua`. Larger games should be able to split definitions across files without changing the runtime model.
+
+This milestone should happen before the showcase grows beyond its scaffold.
+
+### Milestone 7: Parser Quality
 
 ```text
 again / g to repeat the last advancing command
@@ -507,7 +538,7 @@ You see nothing new about the brass key.
 Undone.
 ```
 
-### Milestone 7: Object State
+### Milestone 8: Object State
 
 ```text
 openable and closable containers
@@ -520,7 +551,7 @@ fixed scenery objects that do not clutter room listings
 
 Core state should remain serializable. Prefer explicit Rust-owned object state over ad hoc Lua globals for anything that must survive save/load.
 
-### Milestone 8: Dialogue System
+### Milestone 9: Dialogue System
 
 ```text
 topic aliases: key, brass key, door key
@@ -534,7 +565,7 @@ actor memory stored in Rust-owned state
 
 The current `talk` and `ask actor about topic` model is enough for simple NPCs. This milestone should make conversation useful for puzzles and longer scenes without requiring each game to invent its own dialogue framework.
 
-### Milestone 9: Scenes and Chapters
+### Milestone 10: Scenes and Chapters
 
 ```text
 current scene/chapter in Rust-owned state
@@ -548,7 +579,7 @@ scene/chapter assertions in transcript tests
 
 Scenes should be optional structure for authors, not a requirement for small games.
 
-### Milestone 10: Author Tooling
+### Milestone 11: Author Tooling
 
 ```text
 moonroom check path/to/game
@@ -562,7 +593,7 @@ better Lua load errors with DSL-specific context
 
 This is likely the highest-leverage author experience milestone. As the DSL grows, mistakes should be caught before a player transcript stumbles into them.
 
-### Milestone 11: Save Format Hardening
+### Milestone 12: Save Format Hardening
 
 ```text
 save format version
@@ -575,7 +606,7 @@ backward compatibility tests for representative old saves
 
 The save format should be treated as a public contract once games start depending on it.
 
-### Milestone 12: Testing Improvements
+### Milestone 13: Testing Improvements
 
 ```text
 transcript directives: !contains, !not_contains, !room, !flag, !counter
@@ -588,7 +619,7 @@ fixture games for parser and state regressions
 
 Transcript tests should remain readable story artifacts, but they need enough structure to verify state without forcing authors to expose everything through prose.
 
-### Milestone 13: Packaging and Distribution
+### Milestone 14: Packaging and Distribution
 
 ```text
 installable moonroom binary
@@ -601,7 +632,7 @@ documented game project versioning
 
 This milestone should make it realistic to hand a Moonroom game to someone who is not working inside the repository.
 
-### Milestone 14: Frontends
+### Milestone 15: Frontends
 
 ```text
 keep CLI as the canonical frontend
@@ -613,7 +644,7 @@ possible wasm export if the Lua/runtime constraints are acceptable
 
 New frontends should consume the same engine outputs rather than forking parser or world behavior.
 
-### Milestone 15: Documentation as Product
+### Milestone 16: Documentation as Product
 
 ```text
 build your first Moonroom game tutorial
@@ -642,7 +673,9 @@ save-compatible puzzle state
 The next implementation pass should prioritize:
 
 ```text
-1. again and undo, because they make the CLI feel like classic parser IF.
-2. open, close, lock, and unlock, because they unlock many common puzzle shapes.
-3. moonroom check, because authoring feedback becomes more important as the DSL grows.
+1. Multi-file loading, because the planned project shape and showcase scaffold already need it.
+2. moonroom check, because split projects need better validation and source-aware errors.
+3. read, because the showcase needs authored documents and inspectable clues.
+4. open, close, lock, and unlock, because they unlock many common puzzle shapes.
+5. again and undo, because they make the CLI feel like classic parser IF.
 ```

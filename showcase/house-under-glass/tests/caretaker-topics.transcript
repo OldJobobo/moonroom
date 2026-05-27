@@ -1,0 +1,51 @@
+> north
+Hall
+
+The hall is long and glass-framed, with a caretaker standing where the shadows gather.
+
+You can see a caretaker.
+
+Available exits: south.
+
+The floorboards answer your first step with a tired creak.
+
+> talk to caretaker
+The caretaker looks from you to the tarnished key and waits.
+
+> ask caretaker about key
+"Brass forgets under tarnish," the caretaker says. "Polish it, then ask again."
+
+> south
+Foyer
+
+Rain needles the glass around the front door. A tarnished key waits on the little table.
+
+You can see a hall table, a linen coat, and a tarnished key.
+
+Available exits: east, north.
+
+> take key
+The key is colder than the room around it.
+
+> take coat
+You take the linen coat.
+
+> polish key
+You polish the key with the cuff of the linen coat until brass shows through the dark.
+
+> north
+Hall
+
+The hall is long and glass-framed. The polished key throws a small gold mark ahead of you.
+
+You can see a caretaker.
+
+Available exits: south.
+
+Rain moves across the glass in a pattern almost like handwriting.
+
+> talk to caretaker
+"Bright enough to remember the lock now," the caretaker says, nodding toward the study.
+
+> ask caretaker about key
+"It was cut for the study before the study had a door," the caretaker says.

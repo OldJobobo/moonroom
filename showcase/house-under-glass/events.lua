@@ -1,1 +1,5 @@
--- Planned timed events for the showcase once multi-file loading exists.
+event "rain_memory" {
+  on_trigger = function(game)
+    game.say("Rain moves across the glass in a pattern almost like handwriting.")
+  end
+}

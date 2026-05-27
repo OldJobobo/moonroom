@@ -1,0 +1,53 @@
+> take key
+The key is colder than the room around it.
+
+> take coat
+You take the linen coat.
+
+> wear coat
+You put on the linen coat.
+
+> east
+The tarnished key enters the study lock, but the wards in the brass rasp and refuse it.
+
+> polish key
+You polish the key with the cuff of the linen coat until brass shows through the dark.
+
+Rain moves across the glass in a pattern almost like handwriting.
+
+> east
+Study
+
+Dusty shelves lean over a desk scarred by old candle wax. A black ledger waits beneath the lamp.
+
+You can see a black ledger.
+
+Available exits: west.
+
+> read ledger
+The ledger lists owners in a narrow hand. The final entry has no name, only a water stain shaped like a key.
+
+Somewhere in the hall, the caretaker turns a page you cannot see.
+
+> west
+Foyer
+
+Rain needles the glass around the front door. Study dust has found the cracks in the tile.
+
+You can see a hall table.
+
+Available exits: east, north.
+
+> north
+Hall
+
+The hall is long and glass-framed. Rain sketches the names from the ledger against the panes.
+
+You can see a caretaker.
+
+Available exits: south.
+
+The floorboards answer your first step with a tired creak.
+
+> ask caretaker about ledger
+"Every owner signed it," the caretaker says. "The house kept the rest of the handwriting."

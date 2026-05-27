@@ -279,3 +279,13 @@ cargo run -q -p mr-cli -- test showcase/house-under-glass
 ```
 
 The first slice should pass transcript tests before adding more rooms.
+
+Status: implemented.
+
+Active transcripts:
+
+```text
+opening.transcript
+golden-path.transcript
+caretaker-topics.transcript
+```

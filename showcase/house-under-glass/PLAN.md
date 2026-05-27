@@ -4,6 +4,8 @@ This showcase should become the polished Moonroom demo: a small, complete parser
 
 Keep `examples/house` as the compact integration testbed. It should continue to exercise engine features in miniature. This showcase can be slower, more atmospheric, and more story-shaped.
 
+Use [DESIGN.md](DESIGN.md) as the creative guide for story tone, symbolic motifs, ending shape, and puzzle design constraints.
+
 ## Intent
 
 ```text

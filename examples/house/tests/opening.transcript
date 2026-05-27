@@ -1,0 +1,96 @@
+> look
+Foyer
+
+Rain needles the windows. A brass key rests on the table.
+
+You can see a brass key, a linen coat, a table, and a wooden box.
+
+Available exits: east, north.
+
+> listen
+Rain ticks against the glass with patient fingers.
+
+> east
+The study door is locked tight.
+
+> take coat
+You take the linen coat.
+
+> wear coat
+You put on the linen coat.
+
+> i
+You are carrying a linen coat (worn).
+
+> remove coat
+You remove the linen coat.
+
+> take key
+The key is colder than it should be.
+
+> east
+Study
+
+Dusty shelves lean over a desk scarred by old candle wax.
+
+Available exits: west.
+
+> west
+Foyer
+
+Rain needles the windows. The study dust follows you. The table is bare now.
+
+You can see a table and a wooden box.
+
+Available exits: east, north.
+
+Somewhere above you, the house settles with a soft wooden sigh.
+
+> put key in box
+You put the brass key in the wooden box.
+
+> look in box
+In the wooden box is a brass key.
+
+> take key from box
+The key is colder than it should be.
+
+> look
+Foyer
+
+Rain needles the windows. The study dust follows you. The table is bare now.
+
+You can see a table and a wooden box.
+
+Available exits: east, north.
+
+> polish key
+You polish the key with your sleeve until it catches the light.
+
+> use key
+The polished key warms in your hand, eager for the study door.
+
+For a moment, the house seems to listen.
+
+> north
+Hall
+
+The hall is narrow, but the polished key throws a small gleam ahead.
+
+You can see a caretaker.
+
+Available exits: south.
+
+The floorboards answer your first step with a tired creak.
+
+> talk to caretaker
+"That key remembers more doors than this house has left," the caretaker says.
+
+> ask caretaker about key
+"It was cut for the study before the study had a name," the caretaker says.
+
+> ask caretaker about house
+"The house remembers every hand that closes a door," the caretaker says.
+
+> flip key
+The key lands teeth-up in your palm.

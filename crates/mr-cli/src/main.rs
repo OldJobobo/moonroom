@@ -5,8 +5,8 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use mr_core::CommandResult;
-use mr_lua::LuaGame;
+use mr_core::{CommandResult, WorldValidationReport};
+use mr_lua::{LuaGame, load_game};
 use rustyline::{DefaultEditor, error::ReadlineError};
 
 #[derive(Debug, Parser)]
@@ -27,6 +27,10 @@ enum Command {
         game_dir: PathBuf,
     },
     Test {
+        #[arg(value_name = "GAME_DIR")]
+        game_dir: PathBuf,
+    },
+    Check {
         #[arg(value_name = "GAME_DIR")]
         game_dir: PathBuf,
     },
@@ -68,6 +72,17 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::Check { game_dir } => {
+            let report = check_project(&game_dir)?;
+            print_check_report(&game_dir, &report);
+
+            if report.has_errors() {
+                anyhow::bail!(
+                    "validation failed with {} error(s).",
+                    report.errors().count()
+                );
+            }
+        }
         Command::New { name } => {
             let path = PathBuf::from(name);
             create_project(&path)?;
@@ -80,6 +95,36 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn check_project(game_dir: &Path) -> anyhow::Result<WorldValidationReport> {
+    let game_file = game_dir.join("game.lua");
+    let world = load_game(&game_file).map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    Ok(world.validate())
+}
+
+fn print_check_report(game_dir: &Path, report: &WorldValidationReport) {
+    if report.issues.is_empty() {
+        println!("{}: no issues found.", game_dir.display());
+        return;
+    }
+
+    for issue in report.errors() {
+        eprintln!("error: {}", issue.message);
+    }
+
+    for issue in report.warnings() {
+        eprintln!("warning: {}", issue.message);
+    }
+
+    if !report.has_errors() {
+        println!(
+            "{}: {} warning(s), no errors.",
+            game_dir.display(),
+            report.warnings().count()
+        );
+    }
 }
 
 fn create_project(path: &Path) -> anyhow::Result<()> {
@@ -468,6 +513,74 @@ mod tests {
         let report = mr_test::run_game_tests(&project_dir).expect("template tests should run");
         assert!(report.is_success());
         assert_eq!(report.passed, 1);
+
+        fs::remove_dir_all(project_dir).expect("temporary project should be removed");
+    }
+
+    #[test]
+    fn check_project_reports_invalid_world_graph() {
+        let project_dir = unique_temp_dir("moonroom-check");
+        fs::create_dir_all(&project_dir).expect("test project should be created");
+        fs::write(
+            project_dir.join("game.lua"),
+            r#"
+game {
+  title = "Broken",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A broken room.",
+  exits = {
+    north = "missing",
+    east = {
+      to = "start",
+      requires = "missing_key"
+    }
+  }
+}
+
+thing "coin" {
+  name = "coin",
+  aliases = { "token" },
+  location = "start",
+  portable = true
+}
+
+thing "medal" {
+  name = "medal",
+  aliases = { "token" },
+  location = "missing",
+  portable = true
+}
+"#,
+        )
+        .expect("test game should be written");
+
+        let report = check_project(&project_dir).expect("check should run");
+
+        assert!(report.has_errors());
+        assert!(
+            report
+                .errors()
+                .any(|issue| issue.message.contains("exit 'north' targets missing room"))
+        );
+        assert!(report.errors().any(|issue| {
+            issue
+                .message
+                .contains("requires missing thing 'missing_key'")
+        }));
+        assert!(report.errors().any(|issue| {
+            issue
+                .message
+                .contains("thing 'medal' starts in missing location")
+        }));
+        assert!(
+            report
+                .warnings()
+                .any(|issue| issue.message.contains("alias 'token' is shared"))
+        );
 
         fs::remove_dir_all(project_dir).expect("temporary project should be removed");
     }

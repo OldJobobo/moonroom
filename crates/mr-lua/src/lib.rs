@@ -83,6 +83,7 @@ struct CallbackRegistry {
     on_take: BTreeMap<String, RegistryKey>,
     on_drop: BTreeMap<String, RegistryKey>,
     on_use: BTreeMap<String, RegistryKey>,
+    on_read: BTreeMap<String, RegistryKey>,
     on_talk: BTreeMap<String, RegistryKey>,
     ask_topics: BTreeMap<String, BTreeMap<String, RegistryKey>>,
     verbs: BTreeMap<String, RegistryKey>,
@@ -116,6 +117,7 @@ enum ThingCallback {
     Take,
     Drop,
     Use,
+    Read,
     Talk,
 }
 
@@ -271,6 +273,13 @@ impl LuaGame {
                                 outcome.output = output;
                             }
                         }
+                        GameEvent::Read { thing_id } => {
+                            if let Some(output) =
+                                self.run_thing_callback(&thing_id, ThingCallback::Read)?
+                            {
+                                outcome.output = output;
+                            }
+                        }
                         GameEvent::Talk { thing_id } => {
                             if let Some(output) =
                                 self.run_thing_callback(&thing_id, ThingCallback::Talk)?
@@ -375,6 +384,7 @@ impl LuaGame {
             ThingCallback::Take => &self.callbacks.on_take,
             ThingCallback::Drop => &self.callbacks.on_drop,
             ThingCallback::Use => &self.callbacks.on_use,
+            ThingCallback::Read => &self.callbacks.on_read,
             ThingCallback::Talk => &self.callbacks.on_talk,
         };
 
@@ -898,12 +908,14 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
                 wearable: table.get::<Option<bool>>("wearable")?.unwrap_or(false),
                 actor: table.get::<Option<bool>>("actor")?.unwrap_or(false),
                 desc: table.get("desc")?,
+                read: table.get("read")?,
                 kind: thing_kind(&table)?,
             };
 
             let on_take = table.get::<Option<Function>>("on_take")?;
             let on_drop = table.get::<Option<Function>>("on_drop")?;
             let on_use = table.get::<Option<Function>>("on_use")?;
+            let on_read = table.get::<Option<Function>>("on_read")?;
             let on_talk = table.get::<Option<Function>>("on_talk")?;
             let topics = table.get::<Option<Table>>("topics")?;
             let mut state = thing_state.borrow_mut();
@@ -922,6 +934,11 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
             if let Some(on_use) = on_use {
                 let callback = lua.create_registry_value(on_use)?;
                 state.callbacks.on_use.insert(id.clone(), callback);
+            }
+
+            if let Some(on_read) = on_read {
+                let callback = lua.create_registry_value(on_read)?;
+                state.callbacks.on_read.insert(id.clone(), callback);
             }
 
             if let Some(on_talk) = on_talk {
@@ -1310,6 +1327,50 @@ thing "coin" {
 
         assert!(game.game.world().rooms.contains_key("start"));
         assert!(game.game.world().things.contains_key("coin"));
+    }
+
+    #[test]
+    fn things_can_define_read_text_and_read_callbacks() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-read-test-{}.lua", process::id()));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  title = "Read Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
+}
+
+thing "note" {
+  name = "paper note",
+  aliases = { "note" },
+  location = "start",
+  portable = true,
+  desc = "A folded paper note.",
+  read = "The note says hello.",
+
+  on_read = function(game)
+    game.flag("note_read")
+  end
+}
+"#,
+        )
+        .expect("test game file should write");
+
+        let mut game = LuaGame::load(&game_file).expect("read game loads");
+        let CommandResult::Continue(outcome) =
+            game.handle_command("read note").expect("read succeeds")
+        else {
+            panic!("read should continue");
+        };
+
+        assert_eq!(outcome.output, "The note says hello.");
+        assert!(game.game.has_flag("note_read"));
     }
 
     #[test]

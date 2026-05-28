@@ -6,7 +6,7 @@ Moonroom is a Rust workspace for an interactive fiction engine with Lua-authored
 
 - `crates/mr-core`: serializable world model, game state, parser/action handling, and core events.
 - `crates/mr-lua`: Lua DSL loading, callback registry, controlled `game` API, and JSON save/load of Rust-owned state.
-- `crates/mr-cli`: `moonroom play`, `moonroom test`, and `moonroom new`.
+- `crates/mr-cli`: `moonroom play`, `moonroom test`, `moonroom check`, and `moonroom new`.
 - `crates/mr-test`: transcript parsing and test runner.
 - `examples/house`: the main integration example.
 - `docs/lua-dsl.md`: author-facing Lua DSL reference.
@@ -27,6 +27,12 @@ Run transcript tests:
 cargo run -q -p mr-cli -- test examples/house
 ```
 
+Check static project structure:
+
+```bash
+cargo run -q -p mr-cli -- check examples/house
+```
+
 Create a template game:
 
 ```bash
@@ -38,6 +44,7 @@ Full verification:
 ```bash
 cargo fmt --all --check
 cargo test --workspace
+cargo run -q -p mr-cli -- check examples/house
 cargo run -q -p mr-cli -- test examples/house
 ```
 
@@ -125,7 +132,7 @@ thing "table" {
 
 Portable things can be marked `wearable = true`. Worn items stay in inventory and are tracked in `GameState.worn`.
 
-Things can define `on_take`, `on_drop`, and `on_use` callbacks. Core emits events for those actions and Lua can replace the default output.
+Things can define `read` text plus `on_take`, `on_drop`, `on_read`, and `on_use` callbacks. Core emits events for those actions and Lua can replace the default output.
 
 Things can be marked `actor = true` and can define `on_talk = function(game) ... end`. Actors can also define `topics = { key = function(game) ... end }` for `ask actor about key`.
 

@@ -69,6 +69,7 @@ pub struct Thing {
     pub wearable: bool,
     pub actor: bool,
     pub desc: Option<String>,
+    pub read: Option<String>,
     pub kind: ThingKind,
 }
 
@@ -173,6 +174,169 @@ impl World {
 
         Ok(GameState::new(metadata.start.clone(), &self.things))
     }
+
+    pub fn validate(&self) -> WorldValidationReport {
+        let mut report = WorldValidationReport::default();
+
+        match &self.metadata {
+            Some(metadata) => {
+                if !self.rooms.contains_key(&metadata.start) {
+                    report.error(format!("start room '{}' does not exist", metadata.start));
+                }
+            }
+            None => report.error("game metadata has not been defined"),
+        }
+
+        for (room_id, room) in &self.rooms {
+            if room.id != *room_id {
+                report.error(format!(
+                    "room map key '{room_id}' does not match room id '{}'",
+                    room.id
+                ));
+            }
+
+            for (direction, exit) in &room.exits {
+                if !self.rooms.contains_key(&exit.to) {
+                    report.error(format!(
+                        "room '{room_id}' exit '{direction}' targets missing room '{}'",
+                        exit.to
+                    ));
+                }
+
+                if let Some(required) = &exit.requires
+                    && !self.things.contains_key(required)
+                {
+                    report.error(format!(
+                        "room '{room_id}' exit '{direction}' requires missing thing '{required}'"
+                    ));
+                }
+            }
+        }
+
+        for (thing_id, thing) in &self.things {
+            if thing.id != *thing_id {
+                report.error(format!(
+                    "thing map key '{thing_id}' does not match thing id '{}'",
+                    thing.id
+                ));
+            }
+
+            if thing.location == *thing_id {
+                report.error(format!("thing '{thing_id}' cannot contain itself"));
+            } else if !self.rooms.contains_key(&thing.location)
+                && !self.things.contains_key(&thing.location)
+                && thing.location != "inventory"
+            {
+                report.error(format!(
+                    "thing '{thing_id}' starts in missing location '{}'",
+                    thing.location
+                ));
+            }
+        }
+
+        for thing_id in self.things.keys() {
+            let mut seen = BTreeSet::new();
+            let mut current = thing_id.as_str();
+
+            while let Some(thing) = self.things.get(current) {
+                if !seen.insert(current.to_string()) {
+                    report.error(format!(
+                        "thing '{thing_id}' is in a recursive containment cycle"
+                    ));
+                    break;
+                }
+
+                current = &thing.location;
+            }
+        }
+
+        let mut vocabulary = BTreeMap::<String, Vec<String>>::new();
+
+        for thing in self.things.values() {
+            let mut terms = vec![thing.id.as_str(), thing.name.as_str()];
+            terms.extend(thing.aliases.iter().map(String::as_str));
+
+            for term in terms {
+                let normalized = normalize_noun_phrase(term);
+
+                if !normalized.is_empty() {
+                    vocabulary
+                        .entry(normalized)
+                        .or_default()
+                        .push(thing.id.clone());
+                }
+            }
+        }
+
+        for (term, mut thing_ids) in vocabulary {
+            thing_ids.sort();
+            thing_ids.dedup();
+
+            if thing_ids.len() > 1 {
+                report.warning(format!(
+                    "object name or alias '{term}' is shared by {}",
+                    thing_ids.join(", ")
+                ));
+            }
+        }
+
+        report
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorldValidationReport {
+    pub issues: Vec<WorldValidationIssue>,
+}
+
+impl WorldValidationReport {
+    pub fn is_success(&self) -> bool {
+        !self.has_errors()
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.issues
+            .iter()
+            .any(|issue| issue.severity == WorldValidationSeverity::Error)
+    }
+
+    pub fn errors(&self) -> impl Iterator<Item = &WorldValidationIssue> {
+        self.issues
+            .iter()
+            .filter(|issue| issue.severity == WorldValidationSeverity::Error)
+    }
+
+    pub fn warnings(&self) -> impl Iterator<Item = &WorldValidationIssue> {
+        self.issues
+            .iter()
+            .filter(|issue| issue.severity == WorldValidationSeverity::Warning)
+    }
+
+    fn error(&mut self, message: impl Into<String>) {
+        self.issues.push(WorldValidationIssue {
+            severity: WorldValidationSeverity::Error,
+            message: message.into(),
+        });
+    }
+
+    fn warning(&mut self, message: impl Into<String>) {
+        self.issues.push(WorldValidationIssue {
+            severity: WorldValidationSeverity::Warning,
+            message: message.into(),
+        });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldValidationIssue {
+    pub severity: WorldValidationSeverity,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldValidationSeverity {
+    Error,
+    Warning,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -417,6 +581,7 @@ impl Game {
             "drop" => self.drop(&rest),
             "put" => self.put(&rest),
             "use" => self.use_thing(&rest),
+            "read" => self.read(&rest),
             "wear" | "don" => self.wear(&rest),
             "remove" | "doff" => self.remove(&rest),
             "talk" => self.talk(&rest),
@@ -704,6 +869,30 @@ impl Game {
         CommandOutcome {
             output: format!("You find no use for the {}.", thing.name),
             events: vec![GameEvent::Use { thing_id: id }],
+        }
+    }
+
+    fn read(&mut self, query: &str) -> CommandOutcome {
+        if query.is_empty() {
+            return CommandOutcome::new("Read what?");
+        }
+
+        let Some(id) = self.find_accessible_thing_id(query) else {
+            return CommandOutcome::new("You don't see that here.");
+        };
+
+        let thing = self
+            .world
+            .things
+            .get(&id)
+            .expect("thing id came from world");
+
+        CommandOutcome {
+            output: thing
+                .read
+                .clone()
+                .unwrap_or_else(|| format!("There is nothing to read on the {}.", thing.name)),
+            events: vec![GameEvent::Read { thing_id: id }],
         }
     }
 
@@ -1038,6 +1227,7 @@ pub enum GameEvent {
     Take { thing_id: String },
     Drop { thing_id: String },
     Use { thing_id: String },
+    Read { thing_id: String },
     Talk { thing_id: String },
     Ask { thing_id: String, topic: String },
     CustomVerb { verb_id: String, input: String },
@@ -1316,6 +1506,86 @@ mod tests {
     }
 
     #[test]
+    fn validates_world_graph_before_play() {
+        let mut world = test_world();
+        world.metadata.as_mut().expect("metadata").start = "missing_start".to_string();
+        world
+            .rooms
+            .get_mut("foyer")
+            .expect("foyer")
+            .exits
+            .insert("trapdoor".to_string(), Exit::open("cellar"));
+        world.rooms.get_mut("foyer").expect("foyer").exits.insert(
+            "locked".to_string(),
+            Exit {
+                to: "hall".to_string(),
+                requires: Some("missing_key".to_string()),
+                locked_msg: None,
+            },
+        );
+        world.things.get_mut("brass_key").expect("key").location = "missing_room".to_string();
+        world
+            .things
+            .get_mut("wool_cloak")
+            .expect("cloak")
+            .aliases
+            .push("key".to_string());
+
+        let report = world.validate();
+        let errors = report
+            .errors()
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>();
+        let warnings = report
+            .warnings()
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!report.is_success());
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("start room 'missing_start'"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("exit 'trapdoor' targets missing room 'cellar'"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|message| message
+                    .contains("exit 'locked' requires missing thing 'missing_key'"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("thing 'brass_key' starts in missing location"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.contains("object name or alias 'key' is shared"))
+        );
+    }
+
+    #[test]
+    fn validates_recursive_thing_locations() {
+        let mut world = test_world();
+        world.things.get_mut("wooden_box").expect("box").location = "table".to_string();
+        world.things.get_mut("table").expect("table").location = "wooden_box".to_string();
+
+        let report = world.validate();
+
+        assert!(
+            report
+                .errors()
+                .any(|issue| issue.message.contains("recursive containment cycle"))
+        );
+    }
+
+    #[test]
     fn exit_display_is_controlled_by_world_settings() {
         let game = Game::new(test_world()).expect("valid world");
         assert!(!game.look().expect("look").contains("Available exits"));
@@ -1472,6 +1742,36 @@ mod tests {
     }
 
     #[test]
+    fn reads_accessible_things() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("read key").expect("read command")
+        else {
+            panic!("read should continue");
+        };
+
+        assert_eq!(outcome.output, "The key is stamped STUDY.");
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Read {
+                thing_id: "brass_key".to_string()
+            }]
+        );
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("read cloak").expect("read command")
+        else {
+            panic!("read should continue");
+        };
+
+        assert_eq!(
+            outcome.output,
+            "There is nothing to read on the wool cloak."
+        );
+    }
+
+    #[test]
     fn talks_to_actor_things() {
         let mut game = Game::new(test_world()).expect("valid world");
         let CommandResult::Continue(outcome) = game
@@ -1587,6 +1887,7 @@ mod tests {
                         wearable: false,
                         actor: false,
                         desc: Some("A key.".to_string()),
+                        read: Some("The key is stamped STUDY.".to_string()),
                         kind: ThingKind::Object,
                     },
                 ),
@@ -1601,6 +1902,7 @@ mod tests {
                         wearable: true,
                         actor: false,
                         desc: Some("A cloak of heavy grey wool.".to_string()),
+                        read: None,
                         kind: ThingKind::Object,
                     },
                 ),
@@ -1615,6 +1917,7 @@ mod tests {
                         wearable: false,
                         actor: true,
                         desc: Some("The caretaker waits with folded hands.".to_string()),
+                        read: None,
                         kind: ThingKind::Object,
                     },
                 ),
@@ -1629,6 +1932,7 @@ mod tests {
                         wearable: false,
                         actor: false,
                         desc: Some("A small wooden box.".to_string()),
+                        read: None,
                         kind: ThingKind::Container,
                     },
                 ),
@@ -1643,6 +1947,7 @@ mod tests {
                         wearable: false,
                         actor: false,
                         desc: Some("A narrow table.".to_string()),
+                        read: None,
                         kind: ThingKind::Supporter,
                     },
                 ),

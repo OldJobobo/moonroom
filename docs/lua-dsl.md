@@ -119,10 +119,15 @@ thing "brass_key" {
   location = "foyer",
   portable = true,
   desc = "The brass key is cold and slightly tarnished.",
+  read = "The key is stamped STUDY.",
 
   on_take = function(game)
     game.flag("touched_key")
     game.say("The key is colder than it should be.")
+  end,
+
+  on_read = function(game)
+    game.flag("read_key")
   end,
 
   on_use = function(game)
@@ -197,6 +202,7 @@ look on table
 put key in box
 put key on table
 take key from box
+read note
 use key
 wear coat
 remove coat
@@ -209,6 +215,7 @@ Supported thing callbacks:
 ```lua
 on_take = function(game) ... end
 on_drop = function(game) ... end
+on_read = function(game) ... end
 on_use = function(game) ... end
 on_talk = function(game) ... end
 topics = {

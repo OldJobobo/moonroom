@@ -51,5 +51,10 @@ thing "study_ledger" {
   aliases = { "ledger", "black ledger", "book" },
   location = "study",
   portable = false,
-  desc = "The ledger is bound in black cloth. A pale ribbon marks a page near the end."
+  desc = "The ledger is bound in black cloth. A pale ribbon marks a page near the end.",
+  read = "The ledger lists owners in a narrow hand. The final entry has no name, only a water stain shaped like a key.",
+
+  on_read = function(game)
+    game.flag("ledger_read")
+  end
 }

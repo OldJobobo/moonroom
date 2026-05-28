@@ -233,7 +233,7 @@ caretaker-topics.transcript
   Dialogue before and after key/ledger state changes.
 
 study-ledger.transcript
-  Reading and study-specific puzzle checks once read exists.
+  Reading and study-specific puzzle checks.
 ```
 
 Keep transcripts shorter than a full transcript novel. They are regression tools, not walkthrough prose.
@@ -270,13 +270,14 @@ polish key
 east
 talk to caretaker
 ask caretaker about key
-read ledger, once read exists
+read ledger
 ```
 
 Acceptance:
 
 ```text
 cargo run -q -p mr-cli -- play showcase/house-under-glass
+cargo run -q -p mr-cli -- check showcase/house-under-glass
 cargo run -q -p mr-cli -- test showcase/house-under-glass
 ```
 

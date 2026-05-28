@@ -18,20 +18,3 @@ verb "polish" {
     game.say("Polish what?")
   end
 }
-
-verb "read" {
-  on_action = function(game, input)
-    if input ~= "ledger" and input ~= "the ledger" and input ~= "black ledger" and input ~= "book" then
-      game.say("Read what?")
-      return
-    end
-
-    if game.room() ~= "study" then
-      game.say("There is no ledger here to read.")
-      return
-    end
-
-    game.flag("ledger_read")
-    game.say("The ledger lists owners in a narrow hand. The final entry has no name, only a water stain shaped like a key.")
-  end
-}

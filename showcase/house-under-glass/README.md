@@ -15,7 +15,7 @@ Implemented in this slice:
 - Tarnished key and linen coat puzzle.
 - State-dependent room descriptions.
 - Caretaker dialogue and topics.
-- Custom `polish` and `read` verbs.
+- Custom `polish` verb and built-in `read` support for the ledger.
 - Timed atmospheric event.
 - Transcript coverage for opening, golden path, and caretaker topics.
 
@@ -23,5 +23,6 @@ Implemented in this slice:
 
 ```bash
 cargo run -- play showcase/house-under-glass
+cargo run -- check showcase/house-under-glass
 cargo run -- test showcase/house-under-glass
 ```

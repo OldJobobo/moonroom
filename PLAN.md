@@ -670,12 +670,18 @@ save-compatible puzzle state
 
 ## Recommended Next Work
 
+Completed from this list:
+
+```text
+multi-file loading, because the planned project shape and showcase scaffold already need it.
+moonroom check, with static validation for world graph errors and duplicate object vocabulary.
+read, with thing-authored read text and on_read callbacks for inspectable clues.
+```
+
 The next implementation pass should prioritize:
 
 ```text
-1. Multi-file loading, because the planned project shape and showcase scaffold already need it.
-2. moonroom check, because split projects need better validation and source-aware errors.
-3. read, because the showcase needs authored documents and inspectable clues.
-4. open, close, lock, and unlock, because they unlock many common puzzle shapes.
-5. again and undo, because they make the CLI feel like classic parser IF.
+1. open, close, lock, and unlock, because they unlock many common puzzle shapes.
+2. again and undo, because they make the CLI feel like classic parser IF.
+3. broader moonroom check source context and optional warnings as the DSL grows.
 ```

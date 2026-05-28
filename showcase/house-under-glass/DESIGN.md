@@ -199,10 +199,9 @@ scenery
 
 ## Concrete Next Additions
 
-1. Add `read` as a core verb instead of only a showcase custom verb.
-2. Add openable and lockable object state.
-3. Add the Conservatory as the next room.
-4. Make the ledger unlock additional caretaker topics.
-5. Add a recurring phrase in room descriptions: `kept safe`.
-6. Let the player discover that `safe` and `trapped` are the same word to the house.
-7. Design the Glass Room as a beautiful memory, not a boss room.
+1. Add openable and lockable object state.
+2. Add the Conservatory as the next room.
+3. Make the ledger unlock additional caretaker topics.
+4. Add a recurring phrase in room descriptions: `kept safe`.
+5. Let the player discover that `safe` and `trapped` are the same word to the house.
+6. Design the Glass Room as a beautiful memory, not a boss room.

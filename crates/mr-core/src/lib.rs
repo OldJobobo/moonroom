@@ -70,6 +70,11 @@ pub struct Thing {
     pub actor: bool,
     pub desc: Option<String>,
     pub read: Option<String>,
+    pub openable: bool,
+    pub open: bool,
+    pub lockable: bool,
+    pub locked: bool,
+    pub key: Option<String>,
     pub kind: ThingKind,
 }
 
@@ -107,6 +112,10 @@ pub struct GameState {
     pub inventory: BTreeSet<String>,
     pub worn: BTreeSet<String>,
     pub thing_locations: BTreeMap<String, String>,
+    #[serde(default)]
+    pub open_things: BTreeSet<String>,
+    #[serde(default)]
+    pub locked_things: BTreeSet<String>,
     pub flags: BTreeSet<String>,
     pub counters: BTreeMap<String, i64>,
     pub timers: Vec<ScheduledEvent>,
@@ -141,6 +150,16 @@ impl GameState {
             thing_locations: things
                 .iter()
                 .map(|(id, thing)| (id.clone(), thing.location.clone()))
+                .collect(),
+            open_things: things
+                .iter()
+                .filter(|(_, thing)| thing.open)
+                .map(|(id, _)| id.clone())
+                .collect(),
+            locked_things: things
+                .iter()
+                .filter(|(_, thing)| thing.locked)
+                .map(|(id, _)| id.clone())
                 .collect(),
             flags: BTreeSet::new(),
             counters: BTreeMap::new(),
@@ -231,6 +250,28 @@ impl World {
                     "thing '{thing_id}' starts in missing location '{}'",
                     thing.location
                 ));
+            }
+
+            if thing.open && !thing.openable {
+                report.error(format!("thing '{thing_id}' is open but not openable"));
+            }
+
+            if thing.locked && !thing.lockable {
+                report.error(format!("thing '{thing_id}' is locked but not lockable"));
+            }
+
+            if thing.open && thing.locked {
+                report.error(format!("thing '{thing_id}' cannot start open and locked"));
+            }
+
+            if let Some(key_id) = &thing.key {
+                if key_id == thing_id {
+                    report.error(format!("thing '{thing_id}' cannot use itself as a key"));
+                } else if !self.things.contains_key(key_id) {
+                    report.error(format!(
+                        "thing '{thing_id}' references missing key '{key_id}'"
+                    ));
+                }
             }
         }
 
@@ -352,12 +393,21 @@ pub enum GameError {
 pub struct Game {
     world: World,
     state: GameState,
+    undo_stack: Vec<GameState>,
+    last_command: Option<String>,
 }
 
 impl Game {
+    const UNDO_LIMIT: usize = 20;
+
     pub fn new(world: World) -> Result<Self, GameError> {
         let state = world.initial_state()?;
-        Ok(Self { world, state })
+        Ok(Self {
+            world,
+            state,
+            undo_stack: Vec::new(),
+            last_command: None,
+        })
     }
 
     pub fn state(&self) -> &GameState {
@@ -368,7 +418,36 @@ impl Game {
         state.visited_rooms.insert(state.current_room.clone());
         self.validate_state(&state)?;
         self.state = state;
+        self.clear_history();
         Ok(())
+    }
+
+    pub fn restore_state_for_undo(&mut self, mut state: GameState) -> Result<(), GameError> {
+        state.visited_rooms.insert(state.current_room.clone());
+        self.validate_state(&state)?;
+        self.state = state;
+        Ok(())
+    }
+
+    pub fn last_command(&self) -> Option<&str> {
+        self.last_command.as_deref()
+    }
+
+    pub fn remember_command(&mut self, command: impl Into<String>) {
+        self.last_command = Some(command.into());
+    }
+
+    pub fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.last_command = None;
+    }
+
+    fn push_undo_state(&mut self, state: GameState) {
+        self.undo_stack.push(state);
+
+        if self.undo_stack.len() > Self::UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
     }
 
     pub fn world(&self) -> &World {
@@ -452,6 +531,40 @@ impl Game {
             {
                 return Err(GameError::InvalidState(format!(
                     "thing '{thing_id}' is in unknown location '{location}'"
+                )));
+            }
+        }
+
+        for thing_id in &state.open_things {
+            let Some(thing) = self.world.things.get(thing_id) else {
+                return Err(GameError::InvalidState(format!(
+                    "open set contains unknown thing '{thing_id}'"
+                )));
+            };
+
+            if !thing.openable {
+                return Err(GameError::InvalidState(format!(
+                    "open thing '{thing_id}' is not openable"
+                )));
+            }
+        }
+
+        for thing_id in &state.locked_things {
+            let Some(thing) = self.world.things.get(thing_id) else {
+                return Err(GameError::InvalidState(format!(
+                    "locked set contains unknown thing '{thing_id}'"
+                )));
+            };
+
+            if !thing.lockable {
+                return Err(GameError::InvalidState(format!(
+                    "locked thing '{thing_id}' is not lockable"
+                )));
+            }
+
+            if state.open_things.contains(thing_id) {
+                return Err(GameError::InvalidState(format!(
+                    "thing '{thing_id}' cannot be both open and locked"
                 )));
             }
         }
@@ -563,9 +676,33 @@ impl Game {
         }
 
         let normalized = trimmed.to_lowercase();
+        let normalized = normalize_command_text(&normalized);
+
+        if matches!(normalized.as_str(), "again" | "g") {
+            let Some(command) = self.last_command.clone() else {
+                return Ok(CommandResult::Continue(CommandOutcome::new(
+                    "Nothing to do again.",
+                )));
+            };
+
+            return self.handle_command(&command);
+        }
+
+        if normalized == "undo" {
+            let Some(state) = self.undo_stack.pop() else {
+                return Ok(CommandResult::Continue(CommandOutcome::new(
+                    "Nothing to undo.",
+                )));
+            };
+
+            self.restore_state_for_undo(state)?;
+            return Ok(CommandResult::Continue(CommandOutcome::new("Undone.")));
+        }
+
         let mut parts = normalized.split_whitespace();
         let verb = parts.next().unwrap_or_default();
         let rest = parts.collect::<Vec<_>>().join(" ");
+        let pre_command_state = self.state.clone();
 
         let outcome = match verb {
             "look" | "l" if rest.is_empty() => CommandOutcome {
@@ -582,6 +719,10 @@ impl Game {
             "put" => self.put(&rest),
             "use" => self.use_thing(&rest),
             "read" => self.read(&rest),
+            "open" => self.open(&rest),
+            "close" | "shut" => self.close(&rest),
+            "lock" => self.lock(&rest),
+            "unlock" => self.unlock(&rest),
             "wear" | "don" => self.wear(&rest),
             "remove" | "doff" => self.remove(&rest),
             "talk" => self.talk(&rest),
@@ -606,13 +747,12 @@ impl Game {
                 .unwrap_or_else(|| CommandOutcome::new("I don't understand that.")),
         };
 
-        let advances_turn = !matches!(
-            verb,
-            "look" | "l" | "inventory" | "inv" | "i" | "quit" | "exit"
-        );
+        let advances_turn = command_advances_turn(verb);
         let mut outcome = outcome;
 
         if advances_turn {
+            self.push_undo_state(pre_command_state);
+            self.remember_command(normalized);
             self.state.turn += 1;
             outcome.events.extend(self.due_timer_events());
         }
@@ -698,9 +838,13 @@ impl Game {
             .unwrap_or_else(|| format!("You see nothing special about the {}.", thing.name));
 
         if thing.kind != ThingKind::Object {
-            let contents = self.contents_of(&thing.id);
             output.push_str("\n\n");
-            output.push_str(&describe_contents(thing, &contents));
+            if self.is_closed_container(&thing.id) {
+                output.push_str(&format!("The {} is closed.", thing.name));
+            } else {
+                let contents = self.contents_of(&thing.id);
+                output.push_str(&describe_contents(thing, &contents));
+            }
         }
 
         output
@@ -713,15 +857,30 @@ impl Game {
 
         let (query, source) = split_from_target(query);
 
-        let Some(id) = self.find_reachable_thing_id(query) else {
-            return CommandOutcome::new("You don't see that here.");
-        };
-
-        if let Some(source) = source {
+        let source_id = if let Some(source) = source {
             let Some(source_id) = self.find_accessible_thing_id(source) else {
                 return CommandOutcome::new("You don't see that here.");
             };
 
+            if self.is_closed_container(&source_id) {
+                let source = self
+                    .world
+                    .things
+                    .get(&source_id)
+                    .expect("source id came from world");
+                return CommandOutcome::new(format!("The {} is closed.", source.name));
+            }
+
+            Some(source_id)
+        } else {
+            None
+        };
+
+        let Some(id) = self.find_reachable_thing_id(query) else {
+            return CommandOutcome::new("You don't see that here.");
+        };
+
+        if let Some(source_id) = source_id {
             if self
                 .state
                 .thing_locations
@@ -797,6 +956,10 @@ impl Game {
                     preposition, target.name
                 ));
             }
+        }
+
+        if matches!(target.kind, ThingKind::Container) && self.is_closed_container(&target_id) {
+            return CommandOutcome::new(format!("The {} is closed.", target.name));
         }
 
         let item = self
@@ -893,6 +1056,156 @@ impl Game {
                 .clone()
                 .unwrap_or_else(|| format!("There is nothing to read on the {}.", thing.name)),
             events: vec![GameEvent::Read { thing_id: id }],
+        }
+    }
+
+    fn open(&mut self, query: &str) -> CommandOutcome {
+        if query.is_empty() {
+            return CommandOutcome::new("Open what?");
+        }
+
+        let Some(id) = self.find_accessible_thing_id(query) else {
+            return CommandOutcome::new("You don't see that here.");
+        };
+
+        let thing = self
+            .world
+            .things
+            .get(&id)
+            .expect("thing id came from world");
+        let thing_name = thing.name.clone();
+
+        if !thing.openable {
+            return CommandOutcome::new(format!("You can't open the {}.", thing_name));
+        }
+
+        if self.is_thing_open(&id) {
+            return CommandOutcome::new(format!("The {} is already open.", thing_name));
+        }
+
+        if self.is_thing_locked(&id) {
+            return CommandOutcome::new(format!("The {} is locked.", thing_name));
+        }
+
+        self.state.open_things.insert(id.clone());
+
+        CommandOutcome {
+            output: format!("You open the {}.", thing_name),
+            events: vec![GameEvent::Open { thing_id: id }],
+        }
+    }
+
+    fn close(&mut self, query: &str) -> CommandOutcome {
+        if query.is_empty() {
+            return CommandOutcome::new("Close what?");
+        }
+
+        let Some(id) = self.find_accessible_thing_id(query) else {
+            return CommandOutcome::new("You don't see that here.");
+        };
+
+        let thing = self
+            .world
+            .things
+            .get(&id)
+            .expect("thing id came from world");
+        let thing_name = thing.name.clone();
+
+        if !thing.openable {
+            return CommandOutcome::new(format!("You can't close the {}.", thing_name));
+        }
+
+        if !self.is_thing_open(&id) {
+            return CommandOutcome::new(format!("The {} is already closed.", thing_name));
+        }
+
+        self.state.open_things.remove(&id);
+
+        CommandOutcome {
+            output: format!("You close the {}.", thing_name),
+            events: vec![GameEvent::Close { thing_id: id }],
+        }
+    }
+
+    fn lock(&mut self, query: &str) -> CommandOutcome {
+        if query.is_empty() {
+            return CommandOutcome::new("Lock what?");
+        }
+
+        let (target_query, key_query) = split_with_target(query);
+
+        let Some(id) = self.find_accessible_thing_id(target_query) else {
+            return CommandOutcome::new("You don't see that here.");
+        };
+
+        let thing = self
+            .world
+            .things
+            .get(&id)
+            .expect("thing id came from world");
+        let thing_name = thing.name.clone();
+        let required_key = thing.key.clone();
+
+        if !thing.lockable {
+            return CommandOutcome::new(format!("You can't lock the {}.", thing_name));
+        }
+
+        if self.is_thing_locked(&id) {
+            return CommandOutcome::new(format!("The {} is already locked.", thing_name));
+        }
+
+        if self.is_thing_open(&id) {
+            return CommandOutcome::new(format!("You need to close the {} first.", thing_name));
+        }
+
+        if let Err(output) = self.check_lock_key(&thing_name, required_key.as_deref(), key_query) {
+            return CommandOutcome::new(output);
+        }
+
+        self.state.locked_things.insert(id.clone());
+
+        CommandOutcome {
+            output: format!("You lock the {}.", thing_name),
+            events: vec![GameEvent::Lock { thing_id: id }],
+        }
+    }
+
+    fn unlock(&mut self, query: &str) -> CommandOutcome {
+        if query.is_empty() {
+            return CommandOutcome::new("Unlock what?");
+        }
+
+        let (target_query, key_query) = split_with_target(query);
+
+        let Some(id) = self.find_accessible_thing_id(target_query) else {
+            return CommandOutcome::new("You don't see that here.");
+        };
+
+        let thing = self
+            .world
+            .things
+            .get(&id)
+            .expect("thing id came from world");
+        let thing_name = thing.name.clone();
+        let required_key = thing.key.clone();
+
+        if !thing.lockable {
+            return CommandOutcome::new(format!("You can't unlock the {}.", thing_name));
+        }
+
+        if !self.is_thing_locked(&id) {
+            return CommandOutcome::new(format!("The {} is already unlocked.", thing_name));
+        }
+
+        if let Err(output) = self.check_lock_key(&thing_name, required_key.as_deref(), key_query) {
+            return CommandOutcome::new(output);
+        }
+
+        self.state.locked_things.remove(&id);
+
+        CommandOutcome {
+            output: format!("You unlock the {}.", thing_name),
+            events: vec![GameEvent::Unlock { thing_id: id }],
         }
     }
 
@@ -1033,6 +1346,62 @@ impl Game {
         })
     }
 
+    fn check_lock_key(
+        &self,
+        thing_name: &str,
+        required_key: Option<&str>,
+        key_query: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(required_key) = required_key else {
+            if let Some(key_query) = key_query
+                && self.find_inventory_thing_id(key_query).is_none()
+            {
+                return Err("You aren't carrying that.".to_string());
+            }
+
+            return Ok(());
+        };
+
+        let key_name = self
+            .world
+            .things
+            .get(required_key)
+            .map(|thing| thing.name.as_str())
+            .unwrap_or("right key");
+
+        if let Some(key_query) = key_query {
+            let Some(key_id) = self.find_inventory_thing_id(key_query) else {
+                return Err("You aren't carrying that.".to_string());
+            };
+
+            if key_id != required_key {
+                return Err(format!("That doesn't fit the {}.", thing_name));
+            }
+
+            return Ok(());
+        }
+
+        if self.has(required_key) {
+            Ok(())
+        } else {
+            Err(format!("You need the {}.", key_name))
+        }
+    }
+
+    fn is_thing_open(&self, thing_id: &str) -> bool {
+        self.state.open_things.contains(thing_id)
+    }
+
+    fn is_thing_locked(&self, thing_id: &str) -> bool {
+        self.state.locked_things.contains(thing_id)
+    }
+
+    fn is_closed_container(&self, thing_id: &str) -> bool {
+        self.world.things.get(thing_id).is_some_and(|thing| {
+            thing.kind == ThingKind::Container && thing.openable && !self.is_thing_open(thing_id)
+        })
+    }
+
     fn current_room(&self) -> Result<&Room, GameError> {
         self.world
             .rooms
@@ -1124,6 +1493,10 @@ impl Game {
 
         match (&target.kind, preposition) {
             (ThingKind::Container, "in") | (ThingKind::Supporter, "on") => {
+                if self.is_closed_container(&target.id) {
+                    return format!("The {} is closed.", target.name);
+                }
+
                 describe_contents(target, &self.contents_of(&target.id))
             }
             (ThingKind::Container, _) => format!("Try looking in the {}.", target.name),
@@ -1171,6 +1544,11 @@ impl Game {
         };
 
         if parent.kind == ThingKind::Object {
+            return false;
+        }
+
+        if parent.kind == ThingKind::Container && parent.openable && !self.is_thing_open(&parent.id)
+        {
             return false;
         }
 
@@ -1228,6 +1606,10 @@ pub enum GameEvent {
     Drop { thing_id: String },
     Use { thing_id: String },
     Read { thing_id: String },
+    Open { thing_id: String },
+    Close { thing_id: String },
+    Lock { thing_id: String },
+    Unlock { thing_id: String },
     Talk { thing_id: String },
     Ask { thing_id: String, topic: String },
     CustomVerb { verb_id: String, input: String },
@@ -1312,6 +1694,17 @@ fn normalize_noun_phrase(input: &str) -> String {
     strip_leading_article(&normalized).to_string()
 }
 
+fn normalize_command_text(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn command_advances_turn(verb: &str) -> bool {
+    !matches!(
+        verb,
+        "look" | "l" | "inventory" | "inv" | "i" | "quit" | "exit" | "again" | "g" | "undo"
+    )
+}
+
 fn strip_leading_article(input: &str) -> &str {
     input
         .strip_prefix("the ")
@@ -1335,6 +1728,14 @@ fn split_look_target(query: &str) -> Option<(&str, &str)> {
 fn split_from_target(query: &str) -> (&str, Option<&str>) {
     if let Some((item, source)) = query.split_once(" from ") {
         return (item.trim(), Some(source.trim()));
+    }
+
+    (query.trim(), None)
+}
+
+fn split_with_target(query: &str) -> (&str, Option<&str>) {
+    if let Some((target, tool)) = query.split_once(" with ") {
+        return (target.trim(), Some(tool.trim()));
     }
 
     (query.trim(), None)
@@ -1418,6 +1819,37 @@ mod tests {
             panic!("drop should continue");
         };
         assert_eq!(outcome.output, "You drop the brass key.");
+    }
+
+    #[test]
+    fn repeats_last_advancing_command_and_undoes_state() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        let CommandResult::Continue(outcome) = game.handle_command("again").expect("again command")
+        else {
+            panic!("again should continue");
+        };
+        assert_eq!(outcome.output, "Nothing to do again.");
+
+        game.handle_command("take key").expect("take key");
+        assert!(game.has("brass_key"));
+        assert_eq!(game.state().turn, 1);
+
+        let CommandResult::Continue(outcome) = game.handle_command("undo").expect("undo command")
+        else {
+            panic!("undo should continue");
+        };
+        assert_eq!(outcome.output, "Undone.");
+        assert!(!game.has("brass_key"));
+        assert_eq!(game.state().turn, 0);
+
+        let CommandResult::Continue(outcome) = game.handle_command("again").expect("again command")
+        else {
+            panic!("again should continue");
+        };
+        assert_eq!(outcome.output, "You take the brass key.");
+        assert!(game.has("brass_key"));
+        assert_eq!(game.state().turn, 1);
     }
 
     #[test]
@@ -1586,6 +2018,36 @@ mod tests {
     }
 
     #[test]
+    fn validates_thing_open_and_lock_metadata() {
+        let mut world = test_world();
+        world.things.get_mut("wool_cloak").expect("cloak").open = true;
+        world.things.get_mut("caretaker").expect("caretaker").locked = true;
+        world.things.get_mut("wooden_box").expect("box").key = Some("missing_key".to_string());
+
+        let report = world.validate();
+        let errors = report
+            .errors()
+            .map(|issue| issue.message.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("thing 'wool_cloak' is open but not openable"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("thing 'caretaker' is locked but not lockable"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("references missing key 'missing_key'"))
+        );
+    }
+
+    #[test]
     fn exit_display_is_controlled_by_world_settings() {
         let game = Game::new(test_world()).expect("valid world");
         assert!(!game.look().expect("look").contains("Available exits"));
@@ -1657,6 +2119,100 @@ mod tests {
             panic!("look on should continue");
         };
         assert_eq!(outcome.output, "On the table is a brass key.");
+    }
+
+    #[test]
+    fn opens_closes_locks_and_unlocks_things() {
+        let mut game = Game::new(test_world()).expect("valid world");
+        game.handle_command("take key").expect("take key");
+        game.handle_command("put key in box").expect("put key");
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("close box").expect("close command")
+        else {
+            panic!("close should continue");
+        };
+        assert_eq!(outcome.output, "You close the wooden box.");
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Close {
+                thing_id: "wooden_box".to_string()
+            }]
+        );
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("look in box").expect("look command")
+        else {
+            panic!("look should continue");
+        };
+        assert_eq!(outcome.output, "The wooden box is closed.");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("take key from box")
+            .expect("take from command")
+        else {
+            panic!("take should continue");
+        };
+        assert_eq!(outcome.output, "The wooden box is closed.");
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("open box").expect("open command")
+        else {
+            panic!("open should continue");
+        };
+        assert_eq!(outcome.output, "You open the wooden box.");
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Open {
+                thing_id: "wooden_box".to_string()
+            }]
+        );
+
+        game.handle_command("take key from box").expect("take key");
+        game.handle_command("close box").expect("close box");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("lock box with key")
+            .expect("lock command")
+        else {
+            panic!("lock should continue");
+        };
+        assert_eq!(outcome.output, "You lock the wooden box.");
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Lock {
+                thing_id: "wooden_box".to_string()
+            }]
+        );
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("open box").expect("open command")
+        else {
+            panic!("open should continue");
+        };
+        assert_eq!(outcome.output, "The wooden box is locked.");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("unlock box with cloak")
+            .expect("unlock command")
+        else {
+            panic!("unlock should continue");
+        };
+        assert_eq!(outcome.output, "You aren't carrying that.");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("unlock box with key")
+            .expect("unlock command")
+        else {
+            panic!("unlock should continue");
+        };
+        assert_eq!(outcome.output, "You unlock the wooden box.");
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Unlock {
+                thing_id: "wooden_box".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -1888,6 +2444,11 @@ mod tests {
                         actor: false,
                         desc: Some("A key.".to_string()),
                         read: Some("The key is stamped STUDY.".to_string()),
+                        openable: false,
+                        open: false,
+                        lockable: false,
+                        locked: false,
+                        key: None,
                         kind: ThingKind::Object,
                     },
                 ),
@@ -1903,6 +2464,11 @@ mod tests {
                         actor: false,
                         desc: Some("A cloak of heavy grey wool.".to_string()),
                         read: None,
+                        openable: false,
+                        open: false,
+                        lockable: false,
+                        locked: false,
+                        key: None,
                         kind: ThingKind::Object,
                     },
                 ),
@@ -1918,6 +2484,11 @@ mod tests {
                         actor: true,
                         desc: Some("The caretaker waits with folded hands.".to_string()),
                         read: None,
+                        openable: false,
+                        open: false,
+                        lockable: false,
+                        locked: false,
+                        key: None,
                         kind: ThingKind::Object,
                     },
                 ),
@@ -1933,6 +2504,11 @@ mod tests {
                         actor: false,
                         desc: Some("A small wooden box.".to_string()),
                         read: None,
+                        openable: true,
+                        open: true,
+                        lockable: true,
+                        locked: false,
+                        key: Some("brass_key".to_string()),
                         kind: ThingKind::Container,
                     },
                 ),
@@ -1948,6 +2524,11 @@ mod tests {
                         actor: false,
                         desc: Some("A narrow table.".to_string()),
                         read: None,
+                        openable: false,
+                        open: false,
+                        lockable: false,
+                        locked: false,
+                        key: None,
                         kind: ThingKind::Supporter,
                     },
                 ),

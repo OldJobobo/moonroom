@@ -676,12 +676,14 @@ Completed from this list:
 multi-file loading, because the planned project shape and showcase scaffold already need it.
 moonroom check, with static validation for world graph errors and duplicate object vocabulary.
 read, with thing-authored read text and on_read callbacks for inspectable clues.
+open, close, lock, and unlock for thing-owned object state, including saved open/locked state and Lua callbacks.
+again and undo, with bounded Rust-owned command history and Lua callback state rollback.
 ```
 
 The next implementation pass should prioritize:
 
 ```text
-1. open, close, lock, and unlock, because they unlock many common puzzle shapes.
-2. again and undo, because they make the CLI feel like classic parser IF.
-3. broader moonroom check source context and optional warnings as the DSL grows.
+1. broader moonroom check source context and optional warnings as the DSL grows.
+2. hidden/revealed things, because they let authors build discovery without custom visibility hacks.
+3. transcript directives such as !room and !flag, because they make state checks less dependent on prose.
 ```

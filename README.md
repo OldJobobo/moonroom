@@ -9,8 +9,8 @@ Moonroom is early, but already playable.
 ## Features
 
 - Lua DSL for rooms, things, exits, verbs, actors, topics, and timed events.
-- Classic parser commands: `look`, `go north`, `take key`, `drop key`, `read note`, `use key`, `inventory`, and more.
-- Containers, supporters, wearables, guarded exits, NPC talk, and topic-based dialogue.
+- Classic parser commands: `look`, `go north`, `take key`, `open box`, `unlock chest with key`, `read note`, `again`, `undo`, and more.
+- Containers, supporters, wearables, openable and lockable things, guarded exits, NPC talk, and topic-based dialogue.
 - Deterministic Rust-owned state with JSON save/load.
 - Static project validation with `moonroom check`.
 - Transcript tests for repeatable game behavior.
@@ -113,6 +113,19 @@ thing "brass_key" {
     game.say("The key is colder than it should be.")
   end
 }
+
+thing "cedar_chest" {
+  name = "cedar chest",
+  aliases = { "chest" },
+  location = "foyer",
+  portable = false,
+  container = true,
+  openable = true,
+  open = false,
+  lockable = true,
+  locked = true,
+  key = "brass_key"
+}
 ```
 
 Larger games can split definitions into project-local files:
@@ -132,7 +145,7 @@ Moonroom matches one leading article in object phrases, so `take key`, `take the
 ```text
 crates/mr-core   engine state, parser actions, events, and saveable model
 crates/mr-lua    Lua DSL loading, callbacks, and controlled game API
-crates/mr-cli    moonroom play/test/new command-line frontend
+crates/mr-cli    moonroom play/test/check/new command-line frontend
 crates/mr-test   transcript test parser and runner
 examples/house   main integration example
 docs/lua-dsl.md  author-facing Lua DSL reference
@@ -150,6 +163,5 @@ Moonroom is pre-release and changing quickly. The core design goal is stable, se
 
 Near-term roadmap priorities:
 
-- `again` and `undo`
-- richer object state such as open/closed and locked/unlocked
+- richer object state such as hidden/revealed and light/dark
 - broader author tooling such as `moonroom inspect` and transcript recording

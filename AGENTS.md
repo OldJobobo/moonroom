@@ -52,7 +52,7 @@ The root `./test` helper launches the interactive `examples/house` game.
 
 ## Design Boundaries
 
-- Rust owns saveable state: current room, visited rooms, inventory, thing locations, flags, counters, timers, random seed/state, and turn count.
+- Rust owns saveable state: current room, visited rooms, inventory, thing locations, open/locked thing state, flags, counters, timers, random seed/state, and turn count.
 - Lua owns author definitions and callbacks, but Lua state itself is not serialized.
 - Keep Lua mutation behind the controlled callback `game` API in `mr-lua`.
 - Core should emit events for scriptable behavior instead of depending on Lua directly.
@@ -118,7 +118,9 @@ thing "wooden_box" {
   aliases = { "box" },
   location = "foyer",
   portable = false,
-  container = true
+  container = true,
+  openable = true,
+  open = false
 }
 
 thing "table" {
@@ -132,11 +134,15 @@ thing "table" {
 
 Portable things can be marked `wearable = true`. Worn items stay in inventory and are tracked in `GameState.worn`.
 
-Things can define `read` text plus `on_take`, `on_drop`, `on_read`, and `on_use` callbacks. Core emits events for those actions and Lua can replace the default output.
+Things can define `read` text plus `on_take`, `on_drop`, `on_read`, `on_open`, `on_close`, `on_lock`, `on_unlock`, and `on_use` callbacks. Core emits events for those actions and Lua can replace the default output.
+
+Openable things use `openable = true` and optional initial `open = true`. Lockable things use `lockable = true`, optional initial `locked = true`, and optional `key = "thing_id"`. Open/locked state lives in `GameState.open_things` and `GameState.locked_things`.
 
 Things can be marked `actor = true` and can define `on_talk = function(game) ... end`. Actors can also define `topics = { key = function(game) ... end }` for `ask actor about key`.
 
-Core parser support includes `look in box`, `look on table`, `put key in box`, `put key on table`, `take key from box`, `use key`, `wear coat`, `remove coat`, `talk to caretaker`, and `ask caretaker about key`.
+Core parser support includes `look in box`, `look on table`, `put key in box`, `put key on table`, `take key from box`, `open box`, `close box`, `unlock chest with key`, `lock chest`, `use key`, `wear coat`, `remove coat`, `talk to caretaker`, `ask caretaker about key`, `again`/`g`, and `undo`.
+
+`again` repeats the last advancing command. `undo` restores Rust-owned state from before the last advancing command, including Lua callback mutations when commands run through `LuaGame`. Undo history is bounded and is not serialized into save files.
 
 Timed events are registered with `event "name" { on_trigger = function(game) ... end }` and scheduled through `game.schedule(turns, name)`. Active timers live in `GameState.timers` and must remain serializable.
 

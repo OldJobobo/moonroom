@@ -84,6 +84,10 @@ struct CallbackRegistry {
     on_drop: BTreeMap<String, RegistryKey>,
     on_use: BTreeMap<String, RegistryKey>,
     on_read: BTreeMap<String, RegistryKey>,
+    on_open: BTreeMap<String, RegistryKey>,
+    on_close: BTreeMap<String, RegistryKey>,
+    on_lock: BTreeMap<String, RegistryKey>,
+    on_unlock: BTreeMap<String, RegistryKey>,
     on_talk: BTreeMap<String, RegistryKey>,
     ask_topics: BTreeMap<String, BTreeMap<String, RegistryKey>>,
     verbs: BTreeMap<String, RegistryKey>,
@@ -100,6 +104,8 @@ pub struct LuaGame {
     lua: Lua,
     game: Game,
     callbacks: CallbackRegistry,
+    undo_stack: Vec<GameState>,
+    last_command: Option<String>,
 }
 
 pub fn load_game(path: impl AsRef<Path>) -> Result<World, LuaLoadError> {
@@ -118,6 +124,10 @@ enum ThingCallback {
     Drop,
     Use,
     Read,
+    Open,
+    Close,
+    Lock,
+    Unlock,
     Talk,
 }
 
@@ -167,6 +177,8 @@ impl ScriptSession {
 }
 
 impl LuaGame {
+    const UNDO_LIMIT: usize = 20;
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self, LuaLoadError> {
         let loaded = load_game_data(path)?;
         let game = Game::new(loaded.world)?;
@@ -175,6 +187,8 @@ impl LuaGame {
             lua: loaded.lua,
             game,
             callbacks: loaded.callbacks,
+            undo_stack: Vec::new(),
+            last_command: None,
         })
     }
 
@@ -215,11 +229,36 @@ impl LuaGame {
             })?;
 
         self.game.replace_state(state)?;
+        self.clear_history();
         Ok(())
     }
 
     pub fn handle_command(&mut self, input: &str) -> Result<CommandResult, LuaRunError> {
         let normalized = normalized_command(input);
+
+        if matches!(normalized.as_str(), "again" | "g") {
+            let Some(command) = self.last_command.clone() else {
+                return Ok(CommandResult::Continue(CommandOutcome::new(
+                    "Nothing to do again.",
+                )));
+            };
+
+            return self.handle_command(&command);
+        }
+
+        if normalized == "undo" {
+            let Some(state) = self.undo_stack.pop() else {
+                return Ok(CommandResult::Continue(CommandOutcome::new(
+                    "Nothing to undo.",
+                )));
+            };
+
+            self.game.restore_state_for_undo(state)?;
+            return Ok(CommandResult::Continue(CommandOutcome::new("Undone.")));
+        }
+
+        let advances_turn = command_advances_turn(&normalized);
+        let pre_command_state = advances_turn.then(|| self.game.state().clone());
 
         if !normalized.is_empty()
             && !is_quit_command(&normalized)
@@ -280,6 +319,34 @@ impl LuaGame {
                                 outcome.output = output;
                             }
                         }
+                        GameEvent::Open { thing_id } => {
+                            if let Some(output) =
+                                self.run_thing_callback(&thing_id, ThingCallback::Open)?
+                            {
+                                outcome.output = output;
+                            }
+                        }
+                        GameEvent::Close { thing_id } => {
+                            if let Some(output) =
+                                self.run_thing_callback(&thing_id, ThingCallback::Close)?
+                            {
+                                outcome.output = output;
+                            }
+                        }
+                        GameEvent::Lock { thing_id } => {
+                            if let Some(output) =
+                                self.run_thing_callback(&thing_id, ThingCallback::Lock)?
+                            {
+                                outcome.output = output;
+                            }
+                        }
+                        GameEvent::Unlock { thing_id } => {
+                            if let Some(output) =
+                                self.run_thing_callback(&thing_id, ThingCallback::Unlock)?
+                            {
+                                outcome.output = output;
+                            }
+                        }
                         GameEvent::Talk { thing_id } => {
                             if let Some(output) =
                                 self.run_thing_callback(&thing_id, ThingCallback::Talk)?
@@ -312,10 +379,36 @@ impl LuaGame {
                     outcome.output = append_output(outcome.output, output);
                 }
 
+                self.remember_successful_command(pre_command_state, normalized);
                 Ok(CommandResult::Continue(outcome))
             }
             CommandResult::Quit(output) => Ok(CommandResult::Quit(output)),
         }
+    }
+
+    fn remember_successful_command(
+        &mut self,
+        pre_command_state: Option<GameState>,
+        command: String,
+    ) {
+        let Some(state) = pre_command_state else {
+            return;
+        };
+
+        self.undo_stack.push(state);
+
+        if self.undo_stack.len() > Self::UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+
+        self.last_command = Some(command.clone());
+        self.game.remember_command(command);
+    }
+
+    fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.last_command = None;
+        self.game.clear_history();
     }
 
     fn render_room(&mut self) -> Result<String, LuaRunError> {
@@ -385,6 +478,10 @@ impl LuaGame {
             ThingCallback::Drop => &self.callbacks.on_drop,
             ThingCallback::Use => &self.callbacks.on_use,
             ThingCallback::Read => &self.callbacks.on_read,
+            ThingCallback::Open => &self.callbacks.on_open,
+            ThingCallback::Close => &self.callbacks.on_close,
+            ThingCallback::Lock => &self.callbacks.on_lock,
+            ThingCallback::Unlock => &self.callbacks.on_unlock,
             ThingCallback::Talk => &self.callbacks.on_talk,
         };
 
@@ -909,6 +1006,11 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
                 actor: table.get::<Option<bool>>("actor")?.unwrap_or(false),
                 desc: table.get("desc")?,
                 read: table.get("read")?,
+                openable: table.get::<Option<bool>>("openable")?.unwrap_or(false),
+                open: table.get::<Option<bool>>("open")?.unwrap_or(false),
+                lockable: table.get::<Option<bool>>("lockable")?.unwrap_or(false),
+                locked: table.get::<Option<bool>>("locked")?.unwrap_or(false),
+                key: table.get("key")?,
                 kind: thing_kind(&table)?,
             };
 
@@ -916,6 +1018,10 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
             let on_drop = table.get::<Option<Function>>("on_drop")?;
             let on_use = table.get::<Option<Function>>("on_use")?;
             let on_read = table.get::<Option<Function>>("on_read")?;
+            let on_open = table.get::<Option<Function>>("on_open")?;
+            let on_close = table.get::<Option<Function>>("on_close")?;
+            let on_lock = table.get::<Option<Function>>("on_lock")?;
+            let on_unlock = table.get::<Option<Function>>("on_unlock")?;
             let on_talk = table.get::<Option<Function>>("on_talk")?;
             let topics = table.get::<Option<Table>>("topics")?;
             let mut state = thing_state.borrow_mut();
@@ -939,6 +1045,26 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
             if let Some(on_read) = on_read {
                 let callback = lua.create_registry_value(on_read)?;
                 state.callbacks.on_read.insert(id.clone(), callback);
+            }
+
+            if let Some(on_open) = on_open {
+                let callback = lua.create_registry_value(on_open)?;
+                state.callbacks.on_open.insert(id.clone(), callback);
+            }
+
+            if let Some(on_close) = on_close {
+                let callback = lua.create_registry_value(on_close)?;
+                state.callbacks.on_close.insert(id.clone(), callback);
+            }
+
+            if let Some(on_lock) = on_lock {
+                let callback = lua.create_registry_value(on_lock)?;
+                state.callbacks.on_lock.insert(id.clone(), callback);
+            }
+
+            if let Some(on_unlock) = on_unlock {
+                let callback = lua.create_registry_value(on_unlock)?;
+                state.callbacks.on_unlock.insert(id.clone(), callback);
             }
 
             if let Some(on_talk) = on_talk {
@@ -1142,6 +1268,15 @@ fn is_quit_command(input: &str) -> bool {
     )
 }
 
+fn command_advances_turn(input: &str) -> bool {
+    let verb = input.split_whitespace().next().unwrap_or_default();
+
+    !matches!(
+        verb,
+        "" | "look" | "l" | "inventory" | "inv" | "i" | "quit" | "exit" | "again" | "g" | "undo"
+    )
+}
+
 fn normalized_command(input: &str) -> String {
     input
         .split_whitespace()
@@ -1234,6 +1369,34 @@ mod tests {
             panic!("random verb should continue");
         };
         assert_eq!(outcome.output, "The key lands teeth-up in your palm.");
+    }
+
+    #[test]
+    fn again_and_undo_include_lua_callback_state() {
+        let game_file =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/house/game.lua");
+        let mut game = LuaGame::load(game_file).expect("example loads");
+
+        game.handle_command("take key").expect("take succeeds");
+        assert!(game.game.has("brass_key"));
+        assert!(game.game.has_flag("touched_key"));
+
+        let CommandResult::Continue(outcome) = game.handle_command("undo").expect("undo succeeds")
+        else {
+            panic!("undo should continue");
+        };
+        assert_eq!(outcome.output, "Undone.");
+        assert!(!game.game.has("brass_key"));
+        assert!(!game.game.has_flag("touched_key"));
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("again").expect("again succeeds")
+        else {
+            panic!("again should continue");
+        };
+        assert_eq!(outcome.output, "The key is colder than it should be.");
+        assert!(game.game.has("brass_key"));
+        assert!(game.game.has_flag("touched_key"));
     }
 
     #[test]
@@ -1371,6 +1534,76 @@ thing "note" {
 
         assert_eq!(outcome.output, "The note says hello.");
         assert!(game.game.has_flag("note_read"));
+    }
+
+    #[test]
+    fn things_can_define_open_lock_state_and_callbacks() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-open-test-{}.lua", process::id()));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  title = "Open Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
+}
+
+thing "brass_key" {
+  name = "brass key",
+  aliases = { "key" },
+  location = "start",
+  portable = true
+}
+
+thing "chest" {
+  name = "cedar chest",
+  aliases = { "chest" },
+  location = "start",
+  portable = false,
+  container = true,
+  openable = true,
+  open = false,
+  lockable = true,
+  locked = true,
+  key = "brass_key",
+
+  on_open = function(game)
+    game.flag("chest_opened")
+  end,
+
+  on_close = function(game)
+    game.flag("chest_closed")
+  end,
+
+  on_lock = function(game)
+    game.flag("chest_locked")
+  end,
+
+  on_unlock = function(game)
+    game.flag("chest_unlocked")
+  end
+}
+"#,
+        )
+        .expect("test game file should write");
+
+        let mut game = LuaGame::load(&game_file).expect("open game loads");
+        game.handle_command("take key").expect("take succeeds");
+        game.handle_command("unlock chest with key")
+            .expect("unlock succeeds");
+        game.handle_command("open chest").expect("open succeeds");
+        game.handle_command("close chest").expect("close succeeds");
+        game.handle_command("lock chest").expect("lock succeeds");
+
+        assert!(game.game.has_flag("chest_unlocked"));
+        assert!(game.game.has_flag("chest_opened"));
+        assert!(game.game.has_flag("chest_closed"));
+        assert!(game.game.has_flag("chest_locked"));
     }
 
     #[test]

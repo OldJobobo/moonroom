@@ -145,6 +145,8 @@ thing "wooden_box" {
   location = "foyer",
   portable = false,
   container = true,
+  openable = true,
+  open = false,
   desc = "The box is cedar, darkened by years of damp air."
 }
 
@@ -157,6 +159,31 @@ thing "table" {
   desc = "The table is narrow enough to belong in a hall."
 }
 ```
+
+Openable things store their open/closed state in Rust-owned save data. Closed openable containers block `look in`, `put ... in`, `take ... from`, and nested object matching until opened.
+
+Things can also be lockable:
+
+```lua
+thing "cedar_chest" {
+  name = "cedar chest",
+  aliases = { "chest" },
+  location = "foyer",
+  portable = false,
+  container = true,
+  openable = true,
+  open = false,
+  lockable = true,
+  locked = true,
+  key = "brass_key",
+
+  on_unlock = function(game)
+    game.flag("chest_unlocked")
+  end
+}
+```
+
+`key` is optional. If present, it must be the id of a thing the player carries to `lock` or `unlock` the target. Lockable things can be unlocked with `unlock chest` when the player carries the required key, or explicitly with `unlock chest with brass key`.
 
 Portable things can be wearable:
 
@@ -202,13 +229,21 @@ look on table
 put key in box
 put key on table
 take key from box
+open box
+close box
+unlock chest with key
+lock chest
 read note
 use key
 wear coat
 remove coat
 talk to caretaker
 ask caretaker about key
+again
+undo
 ```
+
+`again` or `g` repeats the last advancing command. `undo` restores the Rust-owned game state from before the last advancing command, including state changed by Lua callbacks. The undo history is bounded and is not written into save files.
 
 Supported thing callbacks:
 
@@ -216,6 +251,10 @@ Supported thing callbacks:
 on_take = function(game) ... end
 on_drop = function(game) ... end
 on_read = function(game) ... end
+on_open = function(game) ... end
+on_close = function(game) ... end
+on_lock = function(game) ... end
+on_unlock = function(game) ... end
 on_use = function(game) ... end
 on_talk = function(game) ... end
 topics = {
@@ -290,7 +329,7 @@ game.cancel(event_name)
 
 `game.random(min, max)` returns a deterministic integer in the inclusive range. The random seed/state is saved with the rest of the engine state, so transcript tests and save/load flows remain reproducible.
 
-Save files serialize Rust-owned state only: current room, visited rooms, inventory, worn items, thing locations, flags, counters, active timers, random seed/state, and turn count. Lua state and Lua globals are not saved.
+Save files serialize Rust-owned state only: current room, visited rooms, inventory, worn items, thing locations, open/locked thing state, flags, counters, active timers, random seed/state, and turn count. Lua state and Lua globals are not saved.
 
 ## Transcript Tests
 

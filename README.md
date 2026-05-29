@@ -8,12 +8,16 @@ Moonroom is early, but already playable.
 
 ## Features
 
-- Lua DSL for rooms, things, exits, verbs, actors, topics, and timed events.
+- Lua DSL for rooms, things, exits, verbs, actors, topics, scenes, chapters, and timed events.
 - Classic parser commands: `look`, `go north`, `take key`, `open box`, `unlock chest with key`, `read note`, `tell caretaker about key`, `show key to caretaker`, `again`, `undo`, and more.
 - Containers, supporters, wearables, hidden/revealed things, openable and lockable things, guarded exits, NPC talk, topic aliases, and Rust-owned actor memory.
-- Deterministic Rust-owned state with JSON save/load.
+- Versioned, game-checked JSON save/load, including scenes, chapters, timers, and actor memory.
 - Static project validation with `moonroom check`.
+- Project inspection with `moonroom inspect`.
 - Transcript tests for repeatable game behavior.
+- Transcript recording with `moonroom transcript`.
+- Single-file `.moon` packages with pack, unpack, play, check, and test support.
+- Standalone executable export with an embedded `.moon` package.
 - Interactive CLI with shell-style command history.
 - Piped input support for smoke tests and scripts.
 
@@ -46,10 +50,51 @@ Run the example game's transcript tests:
 cargo run -q -p mr-cli -- test examples/house
 ```
 
+You can narrow or refresh transcript runs:
+
+```bash
+cargo run -q -p mr-cli -- test examples/house --filter opening
+cargo run -q -p mr-cli -- test examples/house --seed 12345
+cargo run -q -p mr-cli -- test examples/house --update
+```
+
 Check a game for missing rooms, invalid thing locations, invalid guarded exits, and duplicate object vocabulary:
 
 ```bash
 cargo run -q -p mr-cli -- check examples/house
+```
+
+Inspect a game's rooms, things, exits, verbs, events, and callbacks:
+
+```bash
+cargo run -q -p mr-cli -- inspect examples/house
+```
+
+Record a play session to a transcript file:
+
+```bash
+cargo run -q -p mr-cli -- transcript examples/house -o examples/house/tests/recorded.transcript
+```
+
+Package a game for sharing:
+
+```bash
+cargo run -q -p mr-cli -- pack examples/house -o dist/house.moon
+cargo run -q -p mr-cli -- play dist/house.moon
+cargo run -q -p mr-cli -- check dist/house.moon
+cargo run -q -p mr-cli -- test dist/house.moon
+```
+
+Unpack a `.moon` file for inspection or recovery:
+
+```bash
+cargo run -q -p mr-cli -- unpack dist/house.moon -o unpacked-house
+```
+
+Build a standalone executable with the `.moon` package embedded:
+
+```bash
+cargo run -q -p mr-cli -- build examples/house --standalone -o dist/house
 ```
 
 The transcript format is plain text:
@@ -63,6 +108,8 @@ Rain needles the windows. A brass key rests on the table.
 > take key
 You take the brass key.
 !flag touched_key
+!contains brass key
+!not_contains silver key
 ```
 
 Assertion lines beginning with `!` check engine state after a command without being compared as output.
@@ -74,6 +121,7 @@ cargo run -q -p mr-cli -- new my-game
 cargo run -q -p mr-cli -- play my-game
 cargo run -q -p mr-cli -- check my-game
 cargo run -q -p mr-cli -- test my-game
+cargo run -q -p mr-cli -- inspect my-game
 ```
 
 When installed as a binary, the user-facing command is `moonroom`.
@@ -82,6 +130,8 @@ When installed as a binary, the user-facing command is `moonroom`.
 
 ```lua
 game {
+  id = "house-under-glass",
+  version = "0.1.0",
   title = "The House Under Glass",
   author = "Example Author",
   start = "foyer",

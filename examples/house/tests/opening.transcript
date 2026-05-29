@@ -66,11 +66,15 @@ Available exits: east, north.
 
 > polish key
 You polish the key with your sleeve until it catches the light.
+!chapter study
+!scene polished_key
 
 > use key
 The polished key warms in your hand, eager for the study door.
 
 For a moment, the house seems to listen.
+!chapter study
+!scene polished_key
 
 > north
 Hall
@@ -82,6 +86,8 @@ You can see a caretaker.
 Available exits: south.
 
 The floorboards answer your first step with a tired creak.
+!chapter study
+!scene polished_key
 
 > talk to caretaker
 "That key remembers more doors than this house has left," the caretaker says.

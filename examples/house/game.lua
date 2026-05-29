@@ -1,4 +1,6 @@
 game {
+  id = "house-under-glass",
+  version = "0.1.0",
   title = "The House Under Glass",
   author = "Example Author",
   start = "foyer",
@@ -211,6 +213,8 @@ verb "polish" {
   on_action = function(game, input)
     if input == "key" or input == "brass key" then
       if game.has("brass_key") then
+        game.chapter("study")
+        game.start_scene("polished_key")
         game.flag("key_polished")
         game.say("You polish the key with your sleeve until it catches the light.")
       else

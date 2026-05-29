@@ -746,6 +746,11 @@ again and undo, with bounded Rust-owned command history and Lua callback state r
 hidden/revealed things, with saved visibility state and controlled Lua hide/reveal helpers.
 transcript directives for !room, !flag, and !counter state assertions.
 Milestone 9 dialogue basics: topic aliases, flag-gated topic availability, tell/show/give commands, table-form topic callbacks, and Rust-owned actor memory counters.
+Milestone 10 scene/chapter basics: saved current scene/chapter, scene lifecycle hooks, scene-scoped timers, and !scene/!chapter transcript assertions.
+Milestone 11 author tooling basics: moonroom inspect and moonroom transcript recording.
+Milestone 12 save hardening basics: versioned save envelope, game id/version metadata, wrong-game rejection, legacy raw-state loading, and pretty/compact save output.
+Milestone 13 testing improvements: !contains/!not_contains directives, transcript filtering, golden update mode, seed override, command-step failure context, and regression fixture coverage.
+Milestone 14 packaging basics: source folder and .moon GameSource loading, moonroom pack/unpack, play/check/test/inspect package support, standalone executable export with an embedded .moon payload, and package regression fixtures.
 ```
 
 The next implementation pass should prioritize:

@@ -33,6 +33,29 @@ Check static project structure:
 cargo run -q -p mr-cli -- check examples/house
 ```
 
+Inspect the loaded world and callbacks:
+
+```bash
+cargo run -q -p mr-cli -- inspect examples/house
+```
+
+Record a transcript:
+
+```bash
+cargo run -q -p mr-cli -- transcript examples/house -o examples/house/tests/recorded.transcript
+```
+
+Package and inspect release bundles:
+
+```bash
+cargo run -q -p mr-cli -- pack examples/house -o dist/house.moon
+cargo run -q -p mr-cli -- play dist/house.moon
+cargo run -q -p mr-cli -- check dist/house.moon
+cargo run -q -p mr-cli -- test dist/house.moon
+cargo run -q -p mr-cli -- unpack dist/house.moon -o unpacked-house
+cargo run -q -p mr-cli -- build examples/house --standalone -o dist/house
+```
+
 Create a template game:
 
 ```bash
@@ -46,6 +69,7 @@ cargo fmt --all --check
 cargo test --workspace
 cargo run -q -p mr-cli -- check examples/house
 cargo run -q -p mr-cli -- test examples/house
+cargo run -q -p mr-cli -- inspect examples/house
 ```
 
 The root `./test` helper launches the interactive `examples/house` game.
@@ -71,7 +95,7 @@ event "id" { ... }
 include "rooms.lua"
 ```
 
-`include` loads a project-local Lua file relative to the including file. Includes must stay inside the game directory, are loaded at most once, and cyclic includes are rejected. Keep `.luarc.json` in sync with DSL globals.
+`include` loads a project-local Lua file relative to the including file. Includes must stay inside the game directory or packaged `.moon` root, are loaded at most once, and cyclic includes are rejected. Keep `.luarc.json` in sync with DSL globals.
 
 Thing matching ignores one leading article (`the`, `a`, or `an`) and normalizes whitespace/case. Do not add article-prefixed aliases such as `"the key"` unless a future parser feature explicitly needs them.
 
@@ -96,6 +120,15 @@ after_action = function(game, input) ... end
 ```
 
 If `before_action` says output, it intercepts the command before core parsing. `after_action` runs after normal event/callback processing and appends output.
+
+The top-level `game { ... }` table can define optional save identity metadata:
+
+```lua
+id = "stable-game-id"
+version = "0.1.0"
+```
+
+Versioned save files include the game id/title/version and reject loading when the save's game id does not match the currently loaded game. If `id` is omitted, Moonroom uses the title as the save compatibility id. Legacy raw `GameState` JSON saves still load.
 
 The top-level `game { ... }` table can also define engine settings. Currently supported:
 
@@ -140,13 +173,17 @@ Openable things use `openable = true` and optional initial `open = true`. Lockab
 
 Things can start hidden with `hidden = true`. Hidden things are omitted from room descriptions, container/supporter contents, inventory listings, and parser matching until Lua calls `game.reveal("thing_id")`. Lua can call `game.hide("thing_id")` to hide a thing again and `game.visible("thing_id")` to query reveal state. Hidden/revealed state lives in `GameState.hidden_things`.
 
-Things can be marked `actor = true` and can define `on_talk = function(game) ... end`. Actors can also define `topics = { key = function(game) ... end }` for `ask actor about key`.
+Things can be marked `actor = true` and can define `on_talk = function(game) ... end`. Actors can also define `topics = { key = function(game) ... end }` for `ask actor about key`, or table-form topics with aliases, `requires`, `ask`, and `tell` callbacks. Actors can define `on_show` and `on_give` callbacks. Actor memory lives in `GameState.actor_memory`.
 
-Core parser support includes `look in box`, `look on table`, `put key in box`, `put key on table`, `take key from box`, `open box`, `close box`, `unlock chest with key`, `lock chest`, `use key`, `wear coat`, `remove coat`, `talk to caretaker`, `ask caretaker about key`, `again`/`g`, and `undo`.
+Core parser support includes `look in box`, `look on table`, `put key in box`, `put key on table`, `take key from box`, `open box`, `close box`, `unlock chest with key`, `lock chest`, `use key`, `wear coat`, `remove coat`, `talk to caretaker`, `ask caretaker about key`, `tell caretaker about key`, `show key to caretaker`, `give key to caretaker`, `again`/`g`, and `undo`.
 
 `again` repeats the last advancing command. `undo` restores Rust-owned state from before the last advancing command, including Lua callback mutations when commands run through `LuaGame`. Undo history is bounded and is not serialized into save files.
 
-Timed events are registered with `event "name" { on_trigger = function(game) ... end }` and scheduled through `game.schedule(turns, name)`. Active timers live in `GameState.timers` and must remain serializable.
+Timed events are registered with `event "name" { on_trigger = function(game) ... end }` and scheduled through `game.schedule(turns, name)`. Scene-scoped timers use `game.schedule_scene(turns, name)` and only fire if the same scene is active when due. Active timers live in `GameState.timers` and must remain serializable.
+
+Scenes and chapters are optional Rust-owned story structure. Lua can use `game.scene()`, `game.start_scene(name)`, `game.end_scene(name)`, and `game.chapter(name)`. Current scene/chapter live in `GameState.current_scene` and `GameState.current_chapter`. Top-level `game { ... }` can define `on_scene_start`, `on_scene_end`, and `on_chapter` hooks.
+
+The in-game `save` command writes pretty versioned JSON by default. `save --compact path` or `save -c path` writes compact JSON.
 
 Lua callbacks can use `game.random(min, max)` for deterministic inclusive integer rolls. RNG seed/state live in `GameState` so transcript tests and save/load are reproducible.
 
@@ -169,7 +206,11 @@ You take the key.
 !flag touched_key
 ```
 
-Each block compares the output for that command only. Do not include prompt text in expected output. Assertion directives beginning with `!` are checked after the command and are excluded from output comparison. Supported directives are `!room room_id`, `!flag flag_name`, and `!counter counter_name integer_value`.
+Each block compares the output for that command only. Do not include prompt text in expected output. Assertion directives beginning with `!` are checked after the command and are excluded from output comparison. Supported directives are `!contains text`, `!not_contains text`, `!room room_id`, `!scene scene_name`, `!scene none`, `!chapter chapter_name`, `!chapter none`, `!flag flag_name`, and `!counter counter_name integer_value`.
+
+`moonroom test` supports `--filter text` to run matching transcript paths, `--seed integer` to override deterministic random state per transcript, and `--update` to refresh expected output while preserving directive lines.
+
+`.moon` files are single-file release packages. `moonroom play`, `check`, and `test` accept either a source folder or a `.moon` package. `moonroom pack` writes the package, `moonroom unpack` restores the virtual files to a folder, and `moonroom build --standalone` copies the current Moonroom executable with an embedded `.moon` payload.
 
 ## Notes
 

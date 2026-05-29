@@ -18,6 +18,8 @@ Included paths are relative to the file that calls `include`, must stay inside t
 
 ```lua
 game {
+  id = "house-under-glass",
+  version = "0.1.0",
   title = "The House Under Glass",
   author = "Example Author",
   start = "foyer",
@@ -39,11 +41,25 @@ game {
     if input == "use key" then
       game.say("The house settles around the sound.")
     end
+  end,
+
+  on_scene_start = function(game, scene)
+    game.say("Scene started: " .. scene .. ".")
+  end,
+
+  on_scene_end = function(game, scene)
+    game.say("Scene ended: " .. scene .. ".")
+  end,
+
+  on_chapter = function(game, chapter)
+    game.say("Chapter: " .. chapter .. ".")
   end
 }
 ```
 
 `start` must be the id of a room defined in the same file.
+
+`id` and `version` are optional but recommended for released games. Save files include both values. Moonroom rejects loading a save whose game id does not match the currently loaded game. If `id` is omitted, saves use the game title as the compatibility id.
 
 `settings` is optional. Exit display is off by default. Set `settings.exits.show = true` to append an exit list to rendered room descriptions:
 
@@ -54,6 +70,8 @@ Available exits: east, north.
 `settings.exits.label` defaults to `"Available exits"` and can be customized.
 
 `before_action` and `after_action` are optional global hooks. Both receive the controlled `game` API and the normalized command text. If `before_action` calls `game.say`, that output is returned and the command is not handled by the core parser. `after_action` runs after the normal command pipeline and appends any output it says.
+
+`on_scene_start`, `on_scene_end`, and `on_chapter` are optional global hooks. They receive the controlled `game` API and the scene or chapter name after Rust-owned state changes.
 
 ## Rooms
 
@@ -382,10 +400,40 @@ Schedule or cancel them with the game API:
 
 ```lua
 game.schedule(2, "house_settles")
+game.schedule_scene(2, "lamp_flickers")
 game.cancel("house_settles")
 ```
 
 The first argument to `schedule` is the number of advancing turns before the event fires. Timers are saved as Rust-owned state.
+
+`game.schedule_scene(turns, event_name)` requires an active scene and schedules an event that only fires if that same scene is still active when the timer comes due. Ending a scene cancels timers scoped to that scene.
+
+## Scenes and Chapters
+
+Scenes and chapters are optional saved structure for longer games. They are useful for pacing, transcript assertions, and scene-scoped timers.
+
+```lua
+verb "polish" {
+  on_action = function(game, input)
+    if input == "key" then
+      game.chapter("study")
+      game.start_scene("polished_key")
+      game.schedule_scene(2, "key_cools")
+      game.say("The key catches the light.")
+    end
+  end
+}
+
+event "key_cools" {
+  on_trigger = function(game)
+    game.say("The key cools in your hand.")
+  end
+}
+```
+
+`game.scene()` returns the current scene name or `nil`. `game.start_scene(name)` sets the current scene. `game.end_scene(name)` ends the current scene if it matches the given name, clears scene-scoped timers for it, and runs `on_scene_end` if defined.
+
+`game.chapter()` returns the current chapter name or `nil`. `game.chapter(name)` sets the current chapter and runs `on_chapter` if defined.
 
 ## Game API
 
@@ -410,9 +458,15 @@ game.hide(thing_id)
 game.reveal(thing_id)
 game.room()
 game.visited(room_id)
+game.scene()
+game.start_scene(name)
+game.end_scene(name)
+game.chapter()
+game.chapter(name)
 game.turn()
 game.random(min, max)
 game.schedule(turns, event_name)
+game.schedule_scene(turns, event_name)
 game.cancel(event_name)
 ```
 
@@ -422,9 +476,42 @@ game.cancel(event_name)
 
 `game.actor_memory(actor_id, key)` returns a saved actor-specific counter. Missing keys return `0`.
 
+`game.scene()` and `game.chapter()` return saved optional story structure. They are not required for small games.
+
 `game.random(min, max)` returns a deterministic integer in the inclusive range. The random seed/state is saved with the rest of the engine state, so transcript tests and save/load flows remain reproducible.
 
-Save files serialize Rust-owned state only: current room, visited rooms, inventory, worn items, thing locations, open/locked thing state, hidden/revealed thing state, flags, counters, actor memory, active timers, random seed/state, and turn count. Lua state and Lua globals are not saved.
+Save files serialize Rust-owned state only: current room, current scene/chapter, visited rooms, inventory, worn items, thing locations, open/locked thing state, hidden/revealed thing state, flags, counters, actor memory, active timers, random seed/state, and turn count. Lua state and Lua globals are not saved.
+
+Moonroom writes saves as versioned JSON envelopes:
+
+```json
+{
+  "format": "moonroom.save",
+  "version": 1,
+  "game": {
+    "id": "house-under-glass",
+    "title": "The House Under Glass",
+    "version": "0.1.0"
+  },
+  "state": {}
+}
+```
+
+The default in-game command writes pretty JSON:
+
+```text
+save
+save slot.json
+```
+
+Compact output is available for smaller files:
+
+```text
+save --compact slot.json
+save -c slot.json
+```
+
+Legacy raw `GameState` JSON saves from earlier Moonroom builds still load and are treated as format-version 0 migrations into the current state model.
 
 ## Transcript Tests
 
@@ -438,22 +525,34 @@ Rain needles the windows.
 
 > take key
 The key is colder than it should be.
+!contains key
+!not_contains coin
 !flag touched_key
 !counter keys_taken 1
+!chapter study
+!scene polished_key
 
 > north
 Hall
 
 The hall is narrow and unlit.
 !room hall
+!chapter study
+!scene polished_key
 ```
 
 Assertion directives start with `!` and are checked after the command output:
 
 ```text
 !room room_id
+!scene scene_id
+!scene none
+!chapter chapter_id
+!chapter none
 !flag flag_name
 !counter counter_name integer_value
+!contains expected output fragment
+!not_contains forbidden output fragment
 ```
 
 Directive lines are not included in output comparison.
@@ -463,3 +562,62 @@ Run them with:
 ```bash
 moonroom test path/to/game
 ```
+
+Useful test options:
+
+```bash
+moonroom test path/to/game --filter opening
+moonroom test path/to/game --seed 12345
+moonroom test path/to/game --update
+```
+
+`--filter` runs transcript files whose relative path contains the given text. `--seed` resets the deterministic random seed before each transcript. `--update` rewrites expected command output from the current game behavior while preserving directive lines; assertion failures still fail the run.
+
+Record a play session into a transcript with:
+
+```bash
+moonroom transcript path/to/game -o path/to/game/tests/recorded.transcript
+```
+
+Inspect a game project's loaded world and callbacks with:
+
+```bash
+moonroom inspect path/to/game
+```
+
+## Packaging
+
+Moonroom supports three distribution forms:
+
+```text
+source folder      editable author format with Lua files on disk
+.moon package      portable single-file release bundle
+standalone binary  executable runner with an embedded .moon package
+```
+
+Create and use a `.moon` package:
+
+```bash
+moonroom pack path/to/game -o dist/my-game.moon
+moonroom play dist/my-game.moon
+moonroom check dist/my-game.moon
+moonroom test dist/my-game.moon
+```
+
+Unpack a package for inspection, recovery, or tooling:
+
+```bash
+moonroom unpack dist/my-game.moon -o unpacked-my-game
+```
+
+Build a standalone executable:
+
+```bash
+moonroom build path/to/game --standalone -o dist/my-game
+```
+
+The initial `.moon` format is a single JSON archive with `format = "moonroom.moon"`, `version = 1`, `entry = "game.lua"`, metadata copied from the Lua `game { ... }` table, and a virtual file table for the project files. Unpacking writes the virtual files back to a normal source folder, including a generated `moon.json` manifest.
+
+Lua files in packages use the same include rules as source folders: `include` paths are relative to the including Lua file, loaded once, checked for cycles, and cannot escape the packaged root.
+
+Packaging makes released code less casually readable than a folder of loose Lua files. It is not DRM; any local game package can be unpacked or reverse engineered.

@@ -623,14 +623,79 @@ Transcript tests should remain readable story artifacts, but they need enough st
 
 ```text
 installable moonroom binary
-moonroom build to package a game directory
-single-file game bundle format
+moonroom pack to package a game directory into a .moon file
+moonroom play/check/test support for both game directories and .moon packages
+single-file .moon game bundle format
+moonroom unpack for inspection, recovery, and tooling
+moonroom build --standalone to produce one executable with an embedded .moon package
 release profile checks
 example games as distribution fixtures
 documented game project versioning
 ```
 
 This milestone should make it realistic to hand a Moonroom game to someone who is not working inside the repository.
+
+Moonroom should support three first-class game distribution forms:
+
+```text
+source folder      editable author format with Lua files on disk
+.moon package      portable single-file release bundle
+standalone binary  executable runner with an embedded .moon package
+```
+
+Target usage:
+
+```bash
+moonroom play my-game/
+moonroom pack my-game/ -o dist/my-game.moon
+moonroom play dist/my-game.moon
+moonroom check dist/my-game.moon
+moonroom test dist/my-game.moon
+moonroom unpack dist/my-game.moon -o unpacked-my-game
+moonroom build my-game/ --standalone -o dist/my-game
+```
+
+The folder format should remain the normal authoring experience. The `.moon` package should be the normal sharing format for players and reviewers. Standalone builds should be the most convenient player-facing export when the author wants to distribute one executable instead of requiring a separate Moonroom install.
+
+The implementation should introduce a small game-source abstraction so the Lua loader does not care whether `game.lua` and included files come from a directory, a `.moon` package, or embedded bytes:
+
+```rust
+enum GameSource {
+    Directory(PathBuf),
+    Package(PathBuf),
+    Embedded(&'static [u8]),
+}
+```
+
+The package should preserve Moonroom's existing project model by storing a project-local virtual filesystem. Includes should continue to use paths relative to the including Lua file and must not escape the packaged game root.
+
+Initial `.moon` package shape:
+
+```text
+my-game.moon
+  moon.json
+  game.lua
+  rooms.lua
+  things.lua
+  dialogue.lua
+  verbs.lua
+  assets/
+  tests/
+```
+
+Initial `moon.json` shape:
+
+```json
+{
+  "format": "moonroom.moon",
+  "version": 1,
+  "entry": "game.lua",
+  "title": "The House Under Glass",
+  "author": "Example Author"
+}
+```
+
+Start with a simple archive-backed `.moon` format. Later release modes can strip/minify Lua or optionally store Lua bytecode to make distributed game code less casually readable. These modes should be treated as convenience and polish, not as strong DRM; any game that runs locally can be reverse engineered by a determined user.
 
 ### Milestone 15: Frontends
 
@@ -678,12 +743,15 @@ moonroom check, with static validation for world graph errors and duplicate obje
 read, with thing-authored read text and on_read callbacks for inspectable clues.
 open, close, lock, and unlock for thing-owned object state, including saved open/locked state and Lua callbacks.
 again and undo, with bounded Rust-owned command history and Lua callback state rollback.
+hidden/revealed things, with saved visibility state and controlled Lua hide/reveal helpers.
+transcript directives for !room, !flag, and !counter state assertions.
+Milestone 9 dialogue basics: topic aliases, flag-gated topic availability, tell/show/give commands, table-form topic callbacks, and Rust-owned actor memory counters.
 ```
 
 The next implementation pass should prioritize:
 
 ```text
 1. broader moonroom check source context and optional warnings as the DSL grows.
-2. hidden/revealed things, because they let authors build discovery without custom visibility hacks.
-3. transcript directives such as !room and !flag, because they make state checks less dependent on prose.
+2. scenery things, because they let authors add inspectable detail without cluttering room listings.
+3. light and dark room support, because it unlocks a classic parser-fiction constraint while exercising saved world state.
 ```

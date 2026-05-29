@@ -8,8 +8,8 @@ use std::{
 
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 use mr_core::{
-    CommandOutcome, CommandResult, CustomVerb, Exit, ExitDisplaySettings, Game, GameError,
-    GameEvent, GameMetadata, GameSettings, GameState, Room, Thing, ThingKind, World,
+    ActorTopic, CommandOutcome, CommandResult, CustomVerb, Exit, ExitDisplaySettings, Game,
+    GameError, GameEvent, GameMetadata, GameSettings, GameState, Room, Thing, ThingKind, World,
     random_bounded,
 };
 
@@ -89,7 +89,10 @@ struct CallbackRegistry {
     on_lock: BTreeMap<String, RegistryKey>,
     on_unlock: BTreeMap<String, RegistryKey>,
     on_talk: BTreeMap<String, RegistryKey>,
+    on_show: BTreeMap<String, RegistryKey>,
+    on_give: BTreeMap<String, RegistryKey>,
     ask_topics: BTreeMap<String, BTreeMap<String, RegistryKey>>,
+    tell_topics: BTreeMap<String, BTreeMap<String, RegistryKey>>,
     verbs: BTreeMap<String, RegistryKey>,
     events: BTreeMap<String, RegistryKey>,
 }
@@ -132,6 +135,12 @@ enum ThingCallback {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum ItemCallback {
+    Show,
+    Give,
+}
+
+#[derive(Debug, Clone, Copy)]
 enum ActionCallback {
     Before,
     After,
@@ -143,10 +152,13 @@ enum ScriptCommand {
     ClearFlag(String),
     SetCounter(String, i64),
     MoveThing(String, String),
+    HideThing(String),
+    RevealThing(String),
     Goto(String),
     Schedule(u64, String),
     Cancel(String),
     SetRandomState(u64),
+    SetActorMemory(String, String, i64),
 }
 
 #[derive(Debug, Clone)]
@@ -155,7 +167,10 @@ struct ScriptSession {
     commands: Vec<ScriptCommand>,
     flags: BTreeSet<String>,
     counters: BTreeMap<String, i64>,
+    actor_memory: BTreeMap<String, BTreeMap<String, i64>>,
     inventory: BTreeSet<String>,
+    known_things: BTreeSet<String>,
+    hidden_things: BTreeSet<String>,
     current_room: String,
     visited_rooms: BTreeSet<String>,
     random_state: u64,
@@ -168,7 +183,10 @@ impl ScriptSession {
             commands: Vec::new(),
             flags: game.state().flags.clone(),
             counters: game.state().counters.clone(),
+            actor_memory: game.state().actor_memory.clone(),
             inventory: game.state().inventory.clone(),
+            known_things: game.world().things.keys().cloned().collect(),
+            hidden_things: game.state().hidden_things.clone(),
             current_room: game.state().current_room.clone(),
             visited_rooms: game.state().visited_rooms.clone(),
             random_state: game.state().random_state,
@@ -199,6 +217,18 @@ impl LuaGame {
 
     pub fn opening(&mut self) -> Result<String, LuaRunError> {
         self.render_room()
+    }
+
+    pub fn current_room_id(&self) -> &str {
+        self.game.current_room_id()
+    }
+
+    pub fn has_flag(&self, name: &str) -> bool {
+        self.game.has_flag(name)
+    }
+
+    pub fn counter(&self, name: &str) -> i64 {
+        self.game.counter(name)
     }
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), LuaRunError> {
@@ -356,6 +386,25 @@ impl LuaGame {
                         }
                         GameEvent::Ask { thing_id, topic } => {
                             if let Some(output) = self.run_ask_callback(&thing_id, &topic)? {
+                                outcome.output = output;
+                            }
+                        }
+                        GameEvent::Tell { thing_id, topic } => {
+                            if let Some(output) = self.run_tell_callback(&thing_id, &topic)? {
+                                outcome.output = output;
+                            }
+                        }
+                        GameEvent::Show { thing_id, item_id } => {
+                            if let Some(output) =
+                                self.run_item_callback(&thing_id, &item_id, ItemCallback::Show)?
+                            {
+                                outcome.output = output;
+                            }
+                        }
+                        GameEvent::Give { thing_id, item_id } => {
+                            if let Some(output) =
+                                self.run_item_callback(&thing_id, &item_id, ItemCallback::Give)?
+                            {
                                 outcome.output = output;
                             }
                         }
@@ -551,7 +600,60 @@ impl LuaGame {
             .registry_value::<Function>(callback)
             .map_err(LuaRunError::Lua)?;
         let (api, session) = self.game_api().map_err(LuaRunError::Lua)?;
-        function.call::<()>(api).map_err(LuaRunError::Lua)?;
+        function
+            .call::<()>((api, topic))
+            .map_err(LuaRunError::Lua)?;
+        self.take_script_output(&session)
+    }
+
+    fn run_tell_callback(
+        &mut self,
+        thing_id: &str,
+        topic: &str,
+    ) -> Result<Option<String>, LuaRunError> {
+        let Some(callback) = self
+            .callbacks
+            .tell_topics
+            .get(thing_id)
+            .and_then(|topics| topics.get(topic))
+        else {
+            return Ok(None);
+        };
+
+        let function = self
+            .lua
+            .registry_value::<Function>(callback)
+            .map_err(LuaRunError::Lua)?;
+        let (api, session) = self.game_api().map_err(LuaRunError::Lua)?;
+        function
+            .call::<()>((api, topic))
+            .map_err(LuaRunError::Lua)?;
+        self.take_script_output(&session)
+    }
+
+    fn run_item_callback(
+        &mut self,
+        thing_id: &str,
+        item_id: &str,
+        kind: ItemCallback,
+    ) -> Result<Option<String>, LuaRunError> {
+        let callbacks = match kind {
+            ItemCallback::Show => &self.callbacks.on_show,
+            ItemCallback::Give => &self.callbacks.on_give,
+        };
+
+        let Some(callback) = callbacks.get(thing_id) else {
+            return Ok(None);
+        };
+
+        let function = self
+            .lua
+            .registry_value::<Function>(callback)
+            .map_err(LuaRunError::Lua)?;
+        let (api, session) = self.game_api().map_err(LuaRunError::Lua)?;
+        function
+            .call::<()>((api, item_id))
+            .map_err(LuaRunError::Lua)?;
         self.take_script_output(&session)
     }
 
@@ -666,6 +768,63 @@ impl LuaGame {
                 })?,
         )?;
 
+        let actor_memory_session = Rc::clone(&session);
+        api.set(
+            "actor_memory",
+            self.lua
+                .create_function(move |_lua, (actor_id, key): (String, String)| {
+                    Ok(actor_memory_session
+                        .borrow()
+                        .actor_memory
+                        .get(&actor_id)
+                        .and_then(|memory| memory.get(&key))
+                        .copied()
+                        .unwrap_or(0))
+                })?,
+        )?;
+
+        let set_actor_memory_session = Rc::clone(&session);
+        api.set(
+            "set_actor_memory",
+            self.lua.create_function(
+                move |_lua, (actor_id, key, value): (String, String, i64)| {
+                    let mut session = set_actor_memory_session.borrow_mut();
+                    session
+                        .actor_memory
+                        .entry(actor_id.clone())
+                        .or_default()
+                        .insert(key.clone(), value);
+                    session
+                        .commands
+                        .push(ScriptCommand::SetActorMemory(actor_id, key, value));
+                    Ok(())
+                },
+            )?,
+        )?;
+
+        let inc_actor_memory_session = Rc::clone(&session);
+        api.set(
+            "inc_actor_memory",
+            self.lua.create_function(
+                move |_lua, (actor_id, key, amount): (String, String, Option<i64>)| {
+                    let mut session = inc_actor_memory_session.borrow_mut();
+                    let amount = amount.unwrap_or(1);
+                    let value = session
+                        .actor_memory
+                        .entry(actor_id.clone())
+                        .or_default()
+                        .entry(key.clone())
+                        .or_default();
+                    *value += amount;
+                    let value = *value;
+                    session
+                        .commands
+                        .push(ScriptCommand::SetActorMemory(actor_id, key, value));
+                    Ok(value)
+                },
+            )?,
+        )?;
+
         let move_session = Rc::clone(&session);
         api.set(
             "move",
@@ -726,6 +885,42 @@ impl LuaGame {
             "has",
             self.lua.create_function(move |_lua, thing_id: String| {
                 Ok(has_session.borrow().inventory.contains(&thing_id))
+            })?,
+        )?;
+
+        let visible_session = Rc::clone(&session);
+        api.set(
+            "visible",
+            self.lua.create_function(move |_lua, thing_id: String| {
+                let session = visible_session.borrow();
+                Ok(session.known_things.contains(&thing_id)
+                    && !session.hidden_things.contains(&thing_id))
+            })?,
+        )?;
+
+        let hide_session = Rc::clone(&session);
+        api.set(
+            "hide",
+            self.lua.create_function(move |_lua, thing_id: String| {
+                let mut session = hide_session.borrow_mut();
+                if session.known_things.contains(&thing_id) {
+                    session.hidden_things.insert(thing_id.clone());
+                    session.commands.push(ScriptCommand::HideThing(thing_id));
+                }
+                Ok(())
+            })?,
+        )?;
+
+        let reveal_session = Rc::clone(&session);
+        api.set(
+            "reveal",
+            self.lua.create_function(move |_lua, thing_id: String| {
+                let mut session = reveal_session.borrow_mut();
+                if session.known_things.contains(&thing_id) {
+                    session.hidden_things.remove(&thing_id);
+                    session.commands.push(ScriptCommand::RevealThing(thing_id));
+                }
+                Ok(())
             })?,
         )?;
 
@@ -802,6 +997,12 @@ impl LuaGame {
                 ScriptCommand::MoveThing(thing_id, location_id) => {
                     self.game.move_thing(&thing_id, location_id);
                 }
+                ScriptCommand::HideThing(thing_id) => {
+                    self.game.hide_thing(&thing_id);
+                }
+                ScriptCommand::RevealThing(thing_id) => {
+                    self.game.reveal_thing(&thing_id);
+                }
                 ScriptCommand::Goto(room_id) => self.game.goto(&room_id)?,
                 ScriptCommand::Schedule(turns, event_name) => {
                     self.game.schedule_event(turns, event_name);
@@ -809,6 +1010,9 @@ impl LuaGame {
                 ScriptCommand::Cancel(event_name) => self.game.cancel_event(&event_name),
                 ScriptCommand::SetRandomState(random_state) => {
                     self.game.set_random_state(random_state);
+                }
+                ScriptCommand::SetActorMemory(actor_id, key, value) => {
+                    self.game.set_actor_memory(actor_id, key, value);
                 }
             }
         }
@@ -1004,6 +1208,7 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
                 portable: table.get::<Option<bool>>("portable")?.unwrap_or(false),
                 wearable: table.get::<Option<bool>>("wearable")?.unwrap_or(false),
                 actor: table.get::<Option<bool>>("actor")?.unwrap_or(false),
+                hidden: table.get::<Option<bool>>("hidden")?.unwrap_or(false),
                 desc: table.get("desc")?,
                 read: table.get("read")?,
                 openable: table.get::<Option<bool>>("openable")?.unwrap_or(false),
@@ -1023,6 +1228,8 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
             let on_lock = table.get::<Option<Function>>("on_lock")?;
             let on_unlock = table.get::<Option<Function>>("on_unlock")?;
             let on_talk = table.get::<Option<Function>>("on_talk")?;
+            let on_show = table.get::<Option<Function>>("on_show")?;
+            let on_give = table.get::<Option<Function>>("on_give")?;
             let topics = table.get::<Option<Table>>("topics")?;
             let mut state = thing_state.borrow_mut();
             state.world.things.insert(id.clone(), thing);
@@ -1072,18 +1279,96 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
                 state.callbacks.on_talk.insert(id.clone(), callback);
             }
 
-            if let Some(topics) = topics {
-                let mut registered_topics = BTreeMap::new();
+            if let Some(on_show) = on_show {
+                let callback = lua.create_registry_value(on_show)?;
+                state.callbacks.on_show.insert(id.clone(), callback);
+            }
 
-                for pair in topics.pairs::<String, Function>() {
-                    let (topic, callback) = pair?;
-                    registered_topics.insert(topic, lua.create_registry_value(callback)?);
+            if let Some(on_give) = on_give {
+                let callback = lua.create_registry_value(on_give)?;
+                state.callbacks.on_give.insert(id.clone(), callback);
+            }
+
+            if let Some(topics) = topics {
+                let mut registered_ask_topics = BTreeMap::new();
+                let mut registered_tell_topics = BTreeMap::new();
+                let mut topic_metadata = BTreeMap::new();
+
+                for pair in topics.pairs::<String, Value>() {
+                    let (topic, value) = pair?;
+                    match value {
+                        Value::Function(callback) => {
+                            registered_ask_topics
+                                .insert(topic.clone(), lua.create_registry_value(callback)?);
+                            topic_metadata.insert(
+                                topic.clone(),
+                                ActorTopic {
+                                    id: topic,
+                                    aliases: Vec::new(),
+                                    requires: None,
+                                },
+                            );
+                        }
+                        Value::Table(table) => {
+                            let aliases = table
+                                .get::<Option<Table>>("aliases")?
+                                .map(table_to_string_vec)
+                                .transpose()?
+                                .unwrap_or_default();
+                            let requires = table.get::<Option<String>>("requires")?;
+                            let on_ask =
+                                table
+                                    .get::<Option<Function>>("on_ask")?
+                                    .or(table.get::<Option<Function>>("ask")?);
+                            let on_tell =
+                                table
+                                    .get::<Option<Function>>("on_tell")?
+                                    .or(table.get::<Option<Function>>("tell")?);
+
+                            if let Some(on_ask) = on_ask {
+                                registered_ask_topics
+                                    .insert(topic.clone(), lua.create_registry_value(on_ask)?);
+                            }
+
+                            if let Some(on_tell) = on_tell {
+                                registered_tell_topics
+                                    .insert(topic.clone(), lua.create_registry_value(on_tell)?);
+                            }
+
+                            topic_metadata.insert(
+                                topic.clone(),
+                                ActorTopic {
+                                    id: topic,
+                                    aliases,
+                                    requires,
+                                },
+                            );
+                        }
+                        _ => {
+                            return Err(mlua::Error::runtime(
+                                "actor topic must be a function or table",
+                            ));
+                        }
+                    }
                 }
 
-                state
-                    .callbacks
-                    .ask_topics
-                    .insert(id.clone(), registered_topics);
+                if !registered_ask_topics.is_empty() {
+                    state
+                        .callbacks
+                        .ask_topics
+                        .insert(id.clone(), registered_ask_topics);
+                }
+
+                if !registered_tell_topics.is_empty() {
+                    state
+                        .callbacks
+                        .tell_topics
+                        .insert(id.clone(), registered_tell_topics);
+                }
+
+                if !topic_metadata.is_empty() {
+                    state.world.actor_topics.insert(id.clone(), topic_metadata);
+                }
             }
 
             Ok(())
@@ -1289,6 +1574,66 @@ fn normalized_command(input: &str) -> String {
 mod tests {
     use super::*;
     use std::{fs, path::PathBuf, process};
+
+    const DIALOGUE_TEST_GAME: &str = r#"
+game {
+  title = "Dialogue Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
+}
+
+thing "coin" {
+  name = "silver coin",
+  aliases = { "coin" },
+  location = "start",
+  portable = true
+}
+
+thing "caretaker" {
+  name = "caretaker",
+  aliases = { "caretaker" },
+  location = "start",
+  portable = false,
+  actor = true,
+
+  on_show = function(game, item)
+    game.say("The caretaker studies the " .. item .. ".")
+  end,
+
+  on_give = function(game, item)
+    game.move(item, "caretaker")
+    game.say("The caretaker accepts the " .. item .. ".")
+  end,
+
+  topics = {
+    coin = {
+      aliases = { "silver coin" },
+
+      ask = function(game, topic)
+        local count = game.actor_memory("caretaker", "asked:" .. topic)
+        game.say("Ask count: " .. count .. ".")
+      end,
+
+      tell = function(game, topic)
+        game.say("The caretaker remembers " .. topic .. ".")
+      end
+    },
+
+    house = {
+      aliases = { "glass house" },
+      requires = "knows_house",
+
+      ask = function(game)
+        game.say("The house has been waiting.")
+      end
+    }
+  }
+}
+"#;
 
     #[test]
     fn house_uses_flags_callbacks_and_custom_verbs() {
@@ -1604,6 +1949,138 @@ thing "chest" {
         assert!(game.game.has_flag("chest_opened"));
         assert!(game.game.has_flag("chest_closed"));
         assert!(game.game.has_flag("chest_locked"));
+    }
+
+    #[test]
+    fn callbacks_can_reveal_hidden_things() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-hidden-test-{}.lua", process::id()));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  title = "Hidden Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
+}
+
+thing "note" {
+  name = "hidden note",
+  aliases = { "note" },
+  location = "start",
+  portable = true,
+  hidden = true
+}
+
+verb "search" {
+  on_action = function(game, input)
+    if game.visible("note") then
+      game.say("You already found the note.")
+    else
+      game.reveal("note")
+      game.say("You find a hidden note.")
+    end
+  end
+}
+"#,
+        )
+        .expect("test game file should write");
+
+        let mut game = LuaGame::load(&game_file).expect("hidden game loads");
+        let opening = game.opening().expect("opening renders");
+        assert!(!opening.contains("hidden note"));
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("take note").expect("take command")
+        else {
+            panic!("take should continue");
+        };
+        assert_eq!(outcome.output, "You don't see that here.");
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("search").expect("search command")
+        else {
+            panic!("search should continue");
+        };
+        assert_eq!(outcome.output, "You find a hidden note.");
+        assert!(game.game.visible("note"));
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("take note").expect("take command")
+        else {
+            panic!("take should continue");
+        };
+        assert_eq!(outcome.output, "You take the hidden note.");
+    }
+
+    #[test]
+    fn actors_can_use_richer_dialogue_callbacks_and_memory() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-dialogue-test-{}.lua", process::id()));
+        fs::write(&game_file, DIALOGUE_TEST_GAME).expect("test game file should write");
+
+        let mut game = LuaGame::load(&game_file).expect("dialogue game loads");
+        game.handle_command("take coin").expect("take succeeds");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("ask caretaker about silver coin")
+            .expect("ask succeeds")
+        else {
+            panic!("ask should continue");
+        };
+        assert_eq!(outcome.output, "Ask count: 1.");
+        assert_eq!(game.game.actor_memory("caretaker", "asked:coin"), 1);
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("tell caretaker about coin")
+            .expect("tell succeeds")
+        else {
+            panic!("tell should continue");
+        };
+        assert_eq!(outcome.output, "The caretaker remembers coin.");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("ask caretaker about glass house")
+            .expect("gated ask succeeds")
+        else {
+            panic!("ask should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "The caretaker has nothing to say about house."
+        );
+
+        game.game.flag("knows_house");
+        let CommandResult::Continue(outcome) = game
+            .handle_command("ask caretaker about house")
+            .expect("available ask succeeds")
+        else {
+            panic!("ask should continue");
+        };
+        assert_eq!(outcome.output, "The house has been waiting.");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("show coin to caretaker")
+            .expect("show succeeds")
+        else {
+            panic!("show should continue");
+        };
+        assert_eq!(outcome.output, "The caretaker studies the coin.");
+        assert_eq!(game.game.actor_memory("caretaker", "shown:coin"), 1);
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("give coin to caretaker")
+            .expect("give succeeds")
+        else {
+            panic!("give should continue");
+        };
+        assert_eq!(outcome.output, "The caretaker accepts the coin.");
+        assert_eq!(game.game.actor_memory("caretaker", "given:coin"), 1);
+        assert!(!game.game.has("coin"));
     }
 
     #[test]

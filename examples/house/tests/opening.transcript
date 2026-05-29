@@ -89,8 +89,17 @@ The floorboards answer your first step with a tired creak.
 > ask caretaker about key
 "It was cut for the study before the study had a name," the caretaker says.
 
+> show key to caretaker
+The caretaker turns the polished key toward the light and nods once.
+
 > ask caretaker about house
 "The house remembers every hand that closes a door," the caretaker says.
 
+> tell caretaker about old house
+"Then it remembers you now," the caretaker says.
+
 > flip key
 The key lands teeth-up in your palm.
+
+> give key to caretaker
+"Keep it," the caretaker says. "It has chosen your pocket."

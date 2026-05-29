@@ -185,6 +185,20 @@ thing "cedar_chest" {
 
 `key` is optional. If present, it must be the id of a thing the player carries to `lock` or `unlock` the target. Lockable things can be unlocked with `unlock chest` when the player carries the required key, or explicitly with `unlock chest with brass key`.
 
+Things can start hidden:
+
+```lua
+thing "folded_note" {
+  name = "folded note",
+  aliases = { "note" },
+  location = "cedar_chest",
+  portable = true,
+  hidden = true
+}
+```
+
+Hidden things are omitted from room descriptions, container/supporter contents, inventory listings, and parser matching until Lua reveals them with `game.reveal("folded_note")`. `game.hide("folded_note")` hides them again.
+
 Portable things can be wearable:
 
 ```lua
@@ -216,6 +230,66 @@ thing "caretaker" {
   topics = {
     key = function(game)
       game.say("\"It was cut for the study before the study had a name,\" the caretaker says.")
+    end,
+
+    house = {
+      aliases = { "glass house", "old house" },
+      requires = "knows_house",
+
+      ask = function(game, topic)
+        local count = game.actor_memory("caretaker", "asked:" .. topic)
+        game.say("\"The house has been waiting,\" the caretaker says.")
+      end,
+
+      tell = function(game, topic)
+        game.say("The caretaker nods at your story.")
+      end
+    }
+  },
+
+  on_show = function(game, item_id)
+    game.say("The caretaker studies the " .. item_id .. ".")
+  end,
+
+  on_give = function(game, item_id)
+    game.move(item_id, "caretaker")
+    game.say("The caretaker accepts it.")
+  end
+}
+```
+
+Topic shorthand keeps working:
+
+```lua
+topics = {
+  key = function(game) ... end
+}
+```
+
+Table-form topics can define `aliases`, a flag-gated `requires` condition, `ask`/`on_ask`, and `tell`/`on_tell`. Topic aliases are normalized like thing aliases, so `ask caretaker about the old house` can resolve to the canonical `house` topic. If `requires = "flag_name"` is set, the topic is unavailable until that Rust-owned flag exists.
+
+Actor memory is Rust-owned and saved. The engine automatically increments these memory counters when the matching command succeeds:
+
+```text
+asked:topic_id
+told:topic_id
+shown:thing_id
+given:thing_id
+```
+
+Callbacks can also manage their own actor memory keys with `game.set_actor_memory` and `game.inc_actor_memory`.
+
+Multi-step dialogue can branch on actor memory:
+
+```lua
+topics = {
+  key = {
+    ask = function(game, topic)
+      if game.actor_memory("caretaker", "asked:" .. topic) == 1 then
+        game.say("\"First time asking? The key is old,\" the caretaker says.")
+      else
+        game.say("\"I already told you about the key,\" the caretaker says.")
+      end
     end
   }
 }
@@ -239,6 +313,9 @@ wear coat
 remove coat
 talk to caretaker
 ask caretaker about key
+tell caretaker about house
+show key to caretaker
+give key to caretaker
 again
 undo
 ```
@@ -257,8 +334,16 @@ on_lock = function(game) ... end
 on_unlock = function(game) ... end
 on_use = function(game) ... end
 on_talk = function(game) ... end
+on_show = function(game, item_id) ... end
+on_give = function(game, item_id) ... end
 topics = {
-  key = function(game) ... end
+  key = function(game) ... end,
+  house = {
+    aliases = { "glass house" },
+    requires = "knows_house",
+    ask = function(game, topic) ... end,
+    tell = function(game, topic) ... end
+  }
 }
 ```
 
@@ -314,9 +399,15 @@ game.has_flag(name)
 game.counter(name)
 game.set_counter(name, value)
 game.inc_counter(name, amount)
+game.actor_memory(actor_id, key)
+game.set_actor_memory(actor_id, key, value)
+game.inc_actor_memory(actor_id, key, amount)
 game.move(thing_id, location_id)
 game.goto(room_id)
 game.has(thing_id)
+game.visible(thing_id)
+game.hide(thing_id)
+game.reveal(thing_id)
 game.room()
 game.visited(room_id)
 game.turn()
@@ -327,9 +418,13 @@ game.cancel(event_name)
 
 `game.visited(room_id)` returns whether the player has occupied that room. Visited rooms are tracked by the Rust engine and saved.
 
+`game.visible(thing_id)` returns whether a thing is currently revealed. Hidden/revealed state is tracked by the Rust engine and saved.
+
+`game.actor_memory(actor_id, key)` returns a saved actor-specific counter. Missing keys return `0`.
+
 `game.random(min, max)` returns a deterministic integer in the inclusive range. The random seed/state is saved with the rest of the engine state, so transcript tests and save/load flows remain reproducible.
 
-Save files serialize Rust-owned state only: current room, visited rooms, inventory, worn items, thing locations, open/locked thing state, flags, counters, active timers, random seed/state, and turn count. Lua state and Lua globals are not saved.
+Save files serialize Rust-owned state only: current room, visited rooms, inventory, worn items, thing locations, open/locked thing state, hidden/revealed thing state, flags, counters, actor memory, active timers, random seed/state, and turn count. Lua state and Lua globals are not saved.
 
 ## Transcript Tests
 
@@ -343,7 +438,25 @@ Rain needles the windows.
 
 > take key
 The key is colder than it should be.
+!flag touched_key
+!counter keys_taken 1
+
+> north
+Hall
+
+The hall is narrow and unlit.
+!room hall
 ```
+
+Assertion directives start with `!` and are checked after the command output:
+
+```text
+!room room_id
+!flag flag_name
+!counter counter_name integer_value
+```
+
+Directive lines are not included in output comparison.
 
 Run them with:
 

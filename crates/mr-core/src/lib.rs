@@ -60,6 +60,13 @@ pub struct CustomVerb {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorTopic {
+    pub id: String,
+    pub aliases: Vec<String>,
+    pub requires: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thing {
     pub id: String,
     pub name: String,
@@ -68,6 +75,7 @@ pub struct Thing {
     pub portable: bool,
     pub wearable: bool,
     pub actor: bool,
+    pub hidden: bool,
     pub desc: Option<String>,
     pub read: Option<String>,
     pub openable: bool,
@@ -102,6 +110,8 @@ pub struct World {
     pub rooms: BTreeMap<String, Room>,
     pub things: BTreeMap<String, Thing>,
     pub verbs: BTreeMap<String, CustomVerb>,
+    #[serde(default)]
+    pub actor_topics: BTreeMap<String, BTreeMap<String, ActorTopic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,8 +126,12 @@ pub struct GameState {
     pub open_things: BTreeSet<String>,
     #[serde(default)]
     pub locked_things: BTreeSet<String>,
+    #[serde(default)]
+    pub hidden_things: BTreeSet<String>,
     pub flags: BTreeSet<String>,
     pub counters: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub actor_memory: BTreeMap<String, BTreeMap<String, i64>>,
     pub timers: Vec<ScheduledEvent>,
     #[serde(default = "GameState::default_random_seed")]
     pub random_seed: u64,
@@ -161,8 +175,14 @@ impl GameState {
                 .filter(|(_, thing)| thing.locked)
                 .map(|(id, _)| id.clone())
                 .collect(),
+            hidden_things: things
+                .iter()
+                .filter(|(_, thing)| thing.hidden)
+                .map(|(id, _)| id.clone())
+                .collect(),
             flags: BTreeSet::new(),
             counters: BTreeMap::new(),
+            actor_memory: BTreeMap::new(),
             timers: Vec::new(),
             random_seed: Self::DEFAULT_RANDOM_SEED,
             random_state: Self::DEFAULT_RANDOM_SEED,
@@ -288,6 +308,56 @@ impl World {
                 }
 
                 current = &thing.location;
+            }
+        }
+
+        for (actor_id, topics) in &self.actor_topics {
+            let Some(actor) = self.things.get(actor_id) else {
+                report.error(format!("actor topics reference missing actor '{actor_id}'"));
+                continue;
+            };
+
+            if !actor.actor {
+                report.error(format!(
+                    "actor topics reference non-actor thing '{actor_id}'"
+                ));
+            }
+
+            let mut topic_vocabulary = BTreeMap::<String, Vec<String>>::new();
+
+            for (topic_id, topic) in topics {
+                if topic.id != *topic_id {
+                    report.error(format!(
+                        "actor '{actor_id}' topic map key '{topic_id}' does not match topic id '{}'",
+                        topic.id
+                    ));
+                }
+
+                let mut terms = vec![topic.id.as_str()];
+                terms.extend(topic.aliases.iter().map(String::as_str));
+
+                for term in terms {
+                    let normalized = normalize_noun_phrase(term);
+
+                    if !normalized.is_empty() {
+                        topic_vocabulary
+                            .entry(normalized)
+                            .or_default()
+                            .push(topic.id.clone());
+                    }
+                }
+            }
+
+            for (term, mut topic_ids) in topic_vocabulary {
+                topic_ids.sort();
+                topic_ids.dedup();
+
+                if topic_ids.len() > 1 {
+                    report.warning(format!(
+                        "actor '{actor_id}' topic alias '{term}' is shared by {}",
+                        topic_ids.join(", ")
+                    ));
+                }
             }
         }
 
@@ -569,6 +639,36 @@ impl Game {
             }
         }
 
+        for thing_id in &state.hidden_things {
+            if !self.world.things.contains_key(thing_id) {
+                return Err(GameError::InvalidState(format!(
+                    "hidden set contains unknown thing '{thing_id}'"
+                )));
+            }
+        }
+
+        for (actor_id, memory) in &state.actor_memory {
+            let Some(actor) = self.world.things.get(actor_id) else {
+                return Err(GameError::InvalidState(format!(
+                    "actor memory references unknown actor '{actor_id}'"
+                )));
+            };
+
+            if !actor.actor {
+                return Err(GameError::InvalidState(format!(
+                    "actor memory references non-actor thing '{actor_id}'"
+                )));
+            }
+
+            for key in memory.keys() {
+                if key.trim().is_empty() {
+                    return Err(GameError::InvalidState(format!(
+                        "actor memory for '{actor_id}' has an empty key"
+                    )));
+                }
+            }
+        }
+
         for timer in &state.timers {
             if timer.name.trim().is_empty() {
                 return Err(GameError::InvalidState(
@@ -614,6 +714,40 @@ impl Game {
         *counter
     }
 
+    pub fn actor_memory(&self, actor_id: &str, key: &str) -> i64 {
+        self.state
+            .actor_memory
+            .get(actor_id)
+            .and_then(|memory| memory.get(key))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn set_actor_memory(
+        &mut self,
+        actor_id: impl Into<String>,
+        key: impl Into<String>,
+        value: i64,
+    ) {
+        self.state
+            .actor_memory
+            .entry(actor_id.into())
+            .or_default()
+            .insert(key.into(), value);
+    }
+
+    pub fn inc_actor_memory(
+        &mut self,
+        actor_id: impl Into<String>,
+        key: impl Into<String>,
+        amount: i64,
+    ) -> i64 {
+        let memory = self.state.actor_memory.entry(actor_id.into()).or_default();
+        let value = memory.entry(key.into()).or_default();
+        *value += amount;
+        *value
+    }
+
     pub fn move_thing(&mut self, thing_id: &str, location_id: impl Into<String>) -> bool {
         if !self.world.things.contains_key(thing_id) {
             return false;
@@ -645,6 +779,28 @@ impl Game {
 
     pub fn has(&self, thing_id: &str) -> bool {
         self.state.inventory.contains(thing_id)
+    }
+
+    pub fn visible(&self, thing_id: &str) -> bool {
+        self.world.things.contains_key(thing_id) && !self.state.hidden_things.contains(thing_id)
+    }
+
+    pub fn hide_thing(&mut self, thing_id: &str) -> bool {
+        if !self.world.things.contains_key(thing_id) {
+            return false;
+        }
+
+        self.state.hidden_things.insert(thing_id.to_string());
+        true
+    }
+
+    pub fn reveal_thing(&mut self, thing_id: &str) -> bool {
+        if !self.world.things.contains_key(thing_id) {
+            return false;
+        }
+
+        self.state.hidden_things.remove(thing_id);
+        true
     }
 
     pub fn visited(&self, room_id: &str) -> bool {
@@ -727,6 +883,9 @@ impl Game {
             "remove" | "doff" => self.remove(&rest),
             "talk" => self.talk(&rest),
             "ask" => self.ask(&rest),
+            "tell" => self.tell(&rest),
+            "show" => self.show(&rest),
+            "give" => self.give(&rest),
             "go" => self.go(&rest)?,
             "north" | "n" => self.go("north")?,
             "south" | "s" => self.go("south")?,
@@ -802,14 +961,11 @@ impl Game {
     }
 
     fn inventory(&self) -> String {
-        if self.state.inventory.is_empty() {
-            return "You are carrying nothing.".to_string();
-        }
-
         let things = self
             .state
             .inventory
             .iter()
+            .filter(|id| self.visible(id))
             .filter_map(|id| self.world.things.get(id))
             .map(|thing| {
                 if self.state.worn.contains(&thing.id) {
@@ -819,6 +975,10 @@ impl Game {
                 }
             })
             .collect::<Vec<_>>();
+
+        if things.is_empty() {
+            return "You are carrying nothing.".to_string();
+        }
 
         format!("You are carrying {}.", join_phrases(&things))
     }
@@ -1287,25 +1447,114 @@ impl Game {
             return CommandOutcome::new("Ask whom about what?");
         };
 
-        let Some(id) = self.find_reachable_thing_id(actor_query) else {
-            return CommandOutcome::new("You don't see them here.");
+        let Some((id, thing)) = self.find_actor(actor_query) else {
+            return self.actor_not_found_output(actor_query);
         };
+        let actor_name = thing.name.clone();
+        let topic = self.resolve_actor_topic(&id, topic);
 
-        let thing = self
-            .world
-            .things
-            .get(&id)
-            .expect("thing id came from world");
-
-        if !thing.actor {
-            return CommandOutcome::new(format!("The {} does not respond.", thing.name));
+        if !self.actor_topic_available(&id, &topic) {
+            return CommandOutcome::new(format!(
+                "The {} has nothing to say about {}.",
+                actor_name, topic
+            ));
         }
 
+        self.inc_actor_memory(id.clone(), format!("asked:{topic}"), 1);
         CommandOutcome {
-            output: format!("The {} has nothing to say about {}.", thing.name, topic),
+            output: format!("The {} has nothing to say about {}.", actor_name, topic),
             events: vec![GameEvent::Ask {
                 thing_id: id,
-                topic: topic.to_string(),
+                topic,
+            }],
+        }
+    }
+
+    fn tell(&mut self, query: &str) -> CommandOutcome {
+        let Some((actor_query, topic)) = split_tell_target(query) else {
+            return CommandOutcome::new("Tell whom about what?");
+        };
+
+        let Some((id, thing)) = self.find_actor(actor_query) else {
+            return self.actor_not_found_output(actor_query);
+        };
+        let actor_name = thing.name.clone();
+        let topic = self.resolve_actor_topic(&id, topic);
+
+        if !self.actor_topic_available(&id, &topic) {
+            return CommandOutcome::new(format!("The {} does not respond to that.", actor_name));
+        }
+
+        self.inc_actor_memory(id.clone(), format!("told:{topic}"), 1);
+        CommandOutcome {
+            output: format!("The {} does not respond to that.", actor_name),
+            events: vec![GameEvent::Tell {
+                thing_id: id,
+                topic,
+            }],
+        }
+    }
+
+    fn show(&mut self, query: &str) -> CommandOutcome {
+        let Some((item_query, actor_query)) = split_item_actor_target(query) else {
+            return CommandOutcome::new("Show what to whom?");
+        };
+
+        let Some(item_id) = self.find_inventory_thing_id(item_query) else {
+            return CommandOutcome::new("You aren't carrying that.");
+        };
+
+        let Some((actor_id, actor)) = self.find_actor(actor_query) else {
+            return self.actor_not_found_output(actor_query);
+        };
+
+        let actor_name = actor.name.clone();
+        let item = self
+            .world
+            .things
+            .get(&item_id)
+            .expect("thing id came from inventory")
+            .name
+            .clone();
+        self.inc_actor_memory(actor_id.clone(), format!("shown:{item_id}"), 1);
+
+        CommandOutcome {
+            output: format!("The {} shows no interest in the {}.", actor_name, item),
+            events: vec![GameEvent::Show {
+                thing_id: actor_id,
+                item_id,
+            }],
+        }
+    }
+
+    fn give(&mut self, query: &str) -> CommandOutcome {
+        let Some((item_query, actor_query)) = split_item_actor_target(query) else {
+            return CommandOutcome::new("Give what to whom?");
+        };
+
+        let Some(item_id) = self.find_inventory_thing_id(item_query) else {
+            return CommandOutcome::new("You aren't carrying that.");
+        };
+
+        let Some((actor_id, actor)) = self.find_actor(actor_query) else {
+            return self.actor_not_found_output(actor_query);
+        };
+
+        let actor_name = actor.name.clone();
+        let item = self
+            .world
+            .things
+            .get(&item_id)
+            .expect("thing id came from inventory")
+            .name
+            .clone();
+        self.inc_actor_memory(actor_id.clone(), format!("given:{item_id}"), 1);
+
+        CommandOutcome {
+            output: format!("The {} does not want the {}.", actor_name, item),
+            events: vec![GameEvent::Give {
+                thing_id: actor_id,
+                item_id,
             }],
         }
     }
@@ -1396,6 +1645,10 @@ impl Game {
         self.state.locked_things.contains(thing_id)
     }
 
+    fn is_thing_hidden(&self, thing_id: &str) -> bool {
+        self.state.hidden_things.contains(thing_id)
+    }
+
     fn is_closed_container(&self, thing_id: &str) -> bool {
         self.world.things.get(thing_id).is_some_and(|thing| {
             thing.kind == ThingKind::Container && thing.openable && !self.is_thing_open(thing_id)
@@ -1432,10 +1685,12 @@ impl Game {
             .things
             .iter()
             .filter(|(id, _)| {
-                self.state
-                    .thing_locations
-                    .get(*id)
-                    .is_some_and(|location| location == &self.state.current_room)
+                !self.is_thing_hidden(id)
+                    && self
+                        .state
+                        .thing_locations
+                        .get(*id)
+                        .is_some_and(|location| location == &self.state.current_room)
             })
             .map(|(_, thing)| thing)
             .collect()
@@ -1451,6 +1706,7 @@ impl Game {
             self.state
                 .inventory
                 .iter()
+                .filter(|id| self.visible(id))
                 .find(|id| {
                     self.world
                         .things
@@ -1465,7 +1721,9 @@ impl Game {
         self.world
             .things
             .iter()
-            .find(|(id, thing)| thing.matches(query) && self.thing_is_reachable(id))
+            .find(|(id, thing)| {
+                !self.is_thing_hidden(id) && thing.matches(query) && self.thing_is_reachable(id)
+            })
             .map(|(id, _)| id.clone())
     }
 
@@ -1473,6 +1731,7 @@ impl Game {
         self.state
             .inventory
             .iter()
+            .filter(|id| self.visible(id))
             .find(|id| {
                 self.world
                     .things
@@ -1480,6 +1739,67 @@ impl Game {
                     .is_some_and(|thing| thing.matches(query))
             })
             .cloned()
+    }
+
+    fn find_actor(&self, query: &str) -> Option<(String, &Thing)> {
+        let id = self.find_reachable_thing_id(query)?;
+        let thing = self
+            .world
+            .things
+            .get(&id)
+            .expect("thing id came from world");
+
+        thing.actor.then_some((id, thing))
+    }
+
+    fn actor_not_found_output(&self, query: &str) -> CommandOutcome {
+        let Some(id) = self.find_reachable_thing_id(query) else {
+            return CommandOutcome::new("You don't see them here.");
+        };
+
+        let thing = self
+            .world
+            .things
+            .get(&id)
+            .expect("thing id came from world");
+        CommandOutcome::new(format!("The {} does not respond.", thing.name))
+    }
+
+    fn resolve_actor_topic(&self, actor_id: &str, query: &str) -> String {
+        let normalized = normalize_noun_phrase(query);
+
+        self.world
+            .actor_topics
+            .get(actor_id)
+            .and_then(|topics| {
+                topics
+                    .values()
+                    .find(|topic| {
+                        normalize_noun_phrase(&topic.id) == normalized
+                            || topic
+                                .aliases
+                                .iter()
+                                .any(|alias| normalize_noun_phrase(alias) == normalized)
+                    })
+                    .map(|topic| topic.id.clone())
+            })
+            .unwrap_or(normalized)
+    }
+
+    fn actor_topic_available(&self, actor_id: &str, topic_id: &str) -> bool {
+        let Some(topic) = self
+            .world
+            .actor_topics
+            .get(actor_id)
+            .and_then(|topics| topics.get(topic_id))
+        else {
+            return true;
+        };
+
+        topic
+            .requires
+            .as_ref()
+            .is_none_or(|flag| self.has_flag(flag))
     }
 
     fn look_inside(&self, query: &str) -> String {
@@ -1512,10 +1832,12 @@ impl Game {
             .things
             .iter()
             .filter(|(id, _)| {
-                self.state
-                    .thing_locations
-                    .get(*id)
-                    .is_some_and(|location| location == thing_id)
+                !self.is_thing_hidden(id)
+                    && self
+                        .state
+                        .thing_locations
+                        .get(*id)
+                        .is_some_and(|location| location == thing_id)
             })
             .map(|(_, thing)| thing)
             .collect()
@@ -1527,6 +1849,10 @@ impl Game {
     }
 
     fn thing_is_reachable_inner(&self, thing_id: &str, seen: &mut BTreeSet<String>) -> bool {
+        if self.is_thing_hidden(thing_id) {
+            return false;
+        }
+
         if !seen.insert(thing_id.to_string()) {
             return false;
         }
@@ -1612,6 +1938,9 @@ pub enum GameEvent {
     Unlock { thing_id: String },
     Talk { thing_id: String },
     Ask { thing_id: String, topic: String },
+    Tell { thing_id: String, topic: String },
+    Show { thing_id: String, item_id: String },
+    Give { thing_id: String, item_id: String },
     CustomVerb { verb_id: String, input: String },
     Timer { event_name: String },
 }
@@ -1775,6 +2104,24 @@ fn split_ask_target(query: &str) -> Option<(&str, &str)> {
     let topic = topic.trim();
 
     (!actor.is_empty() && !topic.is_empty()).then_some((actor, topic))
+}
+
+fn split_tell_target(query: &str) -> Option<(&str, &str)> {
+    let query = query.trim();
+    let query = query.strip_prefix("to ").unwrap_or(query);
+    let (actor, topic) = query.split_once(" about ")?;
+    let actor = actor.trim();
+    let topic = topic.trim();
+
+    (!actor.is_empty() && !topic.is_empty()).then_some((actor, topic))
+}
+
+fn split_item_actor_target(query: &str) -> Option<(&str, &str)> {
+    let (item, actor) = query.trim().split_once(" to ")?;
+    let item = item.trim();
+    let actor = actor.trim();
+
+    (!item.is_empty() && !actor.is_empty()).then_some((item, actor))
 }
 
 #[cfg(test)]
@@ -2122,6 +2469,44 @@ mod tests {
     }
 
     #[test]
+    fn hidden_things_are_unavailable_until_revealed() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("look in box").expect("look in command")
+        else {
+            panic!("look should continue");
+        };
+        assert_eq!(outcome.output, "There is nothing in the wooden box.");
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("take note").expect("take command")
+        else {
+            panic!("take should continue");
+        };
+        assert_eq!(outcome.output, "You don't see that here.");
+        assert!(!game.visible("hidden_note"));
+
+        assert!(game.reveal_thing("hidden_note"));
+        assert!(game.visible("hidden_note"));
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("look in box").expect("look in command")
+        else {
+            panic!("look should continue");
+        };
+        assert_eq!(outcome.output, "In the wooden box is a hidden note.");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("take note from box")
+            .expect("take command")
+        else {
+            panic!("take should continue");
+        };
+        assert_eq!(outcome.output, "You take the hidden note.");
+    }
+
+    #[test]
     fn opens_closes_locks_and_unlocks_things() {
         let mut game = Game::new(test_world()).expect("valid world");
         game.handle_command("take key").expect("take key");
@@ -2384,6 +2769,86 @@ mod tests {
         assert_eq!(outcome.output, "The table does not respond.");
     }
 
+    #[test]
+    fn supports_topic_aliases_tell_show_give_and_actor_memory() {
+        let mut game = Game::new(test_world()).expect("valid world");
+        game.handle_command("take key").expect("take key");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("ask caretaker about brass key")
+            .expect("ask alias command")
+        else {
+            panic!("ask should continue");
+        };
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Ask {
+                thing_id: "caretaker".to_string(),
+                topic: "key".to_string()
+            }]
+        );
+        assert_eq!(game.actor_memory("caretaker", "asked:key"), 1);
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("ask caretaker about house")
+            .expect("ask gated command")
+        else {
+            panic!("ask should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "The caretaker has nothing to say about house."
+        );
+        assert!(outcome.events.is_empty());
+
+        game.flag("knows_house");
+        let CommandResult::Continue(outcome) = game
+            .handle_command("tell caretaker about glass house")
+            .expect("tell command")
+        else {
+            panic!("tell should continue");
+        };
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Tell {
+                thing_id: "caretaker".to_string(),
+                topic: "house".to_string()
+            }]
+        );
+        assert_eq!(game.actor_memory("caretaker", "told:house"), 1);
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("show key to caretaker")
+            .expect("show command")
+        else {
+            panic!("show should continue");
+        };
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Show {
+                thing_id: "caretaker".to_string(),
+                item_id: "brass_key".to_string()
+            }]
+        );
+        assert_eq!(game.actor_memory("caretaker", "shown:brass_key"), 1);
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("give key to caretaker")
+            .expect("give command")
+        else {
+            panic!("give should continue");
+        };
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::Give {
+                thing_id: "caretaker".to_string(),
+                item_id: "brass_key".to_string()
+            }]
+        );
+        assert_eq!(game.actor_memory("caretaker", "given:brass_key"), 1);
+        assert!(game.has("brass_key"));
+    }
+
     fn test_world() -> World {
         World {
             metadata: Some(GameMetadata {
@@ -2442,6 +2907,7 @@ mod tests {
                         portable: true,
                         wearable: false,
                         actor: false,
+                        hidden: false,
                         desc: Some("A key.".to_string()),
                         read: Some("The key is stamped STUDY.".to_string()),
                         openable: false,
@@ -2462,6 +2928,7 @@ mod tests {
                         portable: true,
                         wearable: true,
                         actor: false,
+                        hidden: false,
                         desc: Some("A cloak of heavy grey wool.".to_string()),
                         read: None,
                         openable: false,
@@ -2482,6 +2949,7 @@ mod tests {
                         portable: false,
                         wearable: false,
                         actor: true,
+                        hidden: false,
                         desc: Some("The caretaker waits with folded hands.".to_string()),
                         read: None,
                         openable: false,
@@ -2502,6 +2970,7 @@ mod tests {
                         portable: false,
                         wearable: false,
                         actor: false,
+                        hidden: false,
                         desc: Some("A small wooden box.".to_string()),
                         read: None,
                         openable: true,
@@ -2522,6 +2991,7 @@ mod tests {
                         portable: false,
                         wearable: false,
                         actor: false,
+                        hidden: false,
                         desc: Some("A narrow table.".to_string()),
                         read: None,
                         openable: false,
@@ -2532,8 +3002,50 @@ mod tests {
                         kind: ThingKind::Supporter,
                     },
                 ),
+                (
+                    "hidden_note".to_string(),
+                    Thing {
+                        id: "hidden_note".to_string(),
+                        name: "hidden note".to_string(),
+                        aliases: vec!["note".to_string(), "hidden note".to_string()],
+                        location: "wooden_box".to_string(),
+                        portable: true,
+                        wearable: false,
+                        actor: false,
+                        hidden: true,
+                        desc: Some("A note tucked into a false seam.".to_string()),
+                        read: Some("The note says LOOK CLOSER.".to_string()),
+                        openable: false,
+                        open: false,
+                        lockable: false,
+                        locked: false,
+                        key: None,
+                        kind: ThingKind::Object,
+                    },
+                ),
             ]),
             verbs: BTreeMap::new(),
+            actor_topics: BTreeMap::from([(
+                "caretaker".to_string(),
+                BTreeMap::from([
+                    (
+                        "key".to_string(),
+                        ActorTopic {
+                            id: "key".to_string(),
+                            aliases: vec!["brass key".to_string()],
+                            requires: None,
+                        },
+                    ),
+                    (
+                        "house".to_string(),
+                        ActorTopic {
+                            id: "house".to_string(),
+                            aliases: vec!["glass house".to_string()],
+                            requires: Some("knows_house".to_string()),
+                        },
+                    ),
+                ]),
+            )]),
         }
     }
 }

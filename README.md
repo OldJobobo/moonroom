@@ -9,8 +9,8 @@ Moonroom is early, but already playable.
 ## Features
 
 - Lua DSL for rooms, things, exits, verbs, actors, topics, and timed events.
-- Classic parser commands: `look`, `go north`, `take key`, `open box`, `unlock chest with key`, `read note`, `again`, `undo`, and more.
-- Containers, supporters, wearables, openable and lockable things, guarded exits, NPC talk, and topic-based dialogue.
+- Classic parser commands: `look`, `go north`, `take key`, `open box`, `unlock chest with key`, `read note`, `tell caretaker about key`, `show key to caretaker`, `again`, `undo`, and more.
+- Containers, supporters, wearables, hidden/revealed things, openable and lockable things, guarded exits, NPC talk, topic aliases, and Rust-owned actor memory.
 - Deterministic Rust-owned state with JSON save/load.
 - Static project validation with `moonroom check`.
 - Transcript tests for repeatable game behavior.
@@ -59,7 +59,13 @@ The transcript format is plain text:
 Foyer
 
 Rain needles the windows. A brass key rests on the table.
+
+> take key
+You take the brass key.
+!flag touched_key
 ```
+
+Assertion lines beginning with `!` check engine state after a command without being compared as output.
 
 ## Create A Game
 
@@ -126,6 +132,14 @@ thing "cedar_chest" {
   locked = true,
   key = "brass_key"
 }
+
+thing "folded_note" {
+  name = "folded note",
+  aliases = { "note" },
+  location = "cedar_chest",
+  portable = true,
+  hidden = true
+}
 ```
 
 Larger games can split definitions into project-local files:
@@ -163,5 +177,5 @@ Moonroom is pre-release and changing quickly. The core design goal is stable, se
 
 Near-term roadmap priorities:
 
-- richer object state such as hidden/revealed and light/dark
+- richer object state such as light/dark and scenery
 - broader author tooling such as `moonroom inspect` and transcript recording

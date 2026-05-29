@@ -151,18 +151,52 @@ thing "caretaker" {
   end,
 
   topics = {
-    key = function(game)
-      if game.has_flag("key_polished") then
-        game.say("\"It was cut for the study before the study had a name,\" the caretaker says.")
-      else
-        game.say("\"Polish it first,\" the caretaker says. \"Then ask me again.\"")
-      end
-    end,
+    key = {
+      aliases = { "brass key", "study key" },
 
-    house = function(game)
-      game.say("\"The house remembers every hand that closes a door,\" the caretaker says.")
+      ask = function(game, topic)
+        if game.has_flag("key_polished") then
+          local count = game.actor_memory("caretaker", "asked:" .. topic)
+          if count == 1 then
+            game.say("\"It was cut for the study before the study had a name,\" the caretaker says.")
+          else
+            game.say("\"I have told you what I know of the key,\" the caretaker says.")
+          end
+        else
+          game.say("\"Polish it first,\" the caretaker says. \"Then ask me again.\"")
+        end
+      end,
+
+      tell = function(game)
+        game.say("The caretaker listens closely to your theory about the key.")
+      end
+    },
+
+    house = {
+      aliases = { "glass house", "old house" },
+      requires = "key_polished",
+
+      ask = function(game)
+        game.say("\"The house remembers every hand that closes a door,\" the caretaker says.")
+      end,
+
+      tell = function(game)
+        game.say("\"Then it remembers you now,\" the caretaker says.")
+      end
+    }
+  },
+
+  on_show = function(game, item_id)
+    if item_id == "brass_key" and game.has_flag("key_polished") then
+      game.say("The caretaker turns the polished key toward the light and nods once.")
     end
-  }
+  end,
+
+  on_give = function(game, item_id)
+    if item_id == "brass_key" then
+      game.say("\"Keep it,\" the caretaker says. \"It has chosen your pocket.\"")
+    end
+  end
 }
 
 event "house_settles" {

@@ -1,0 +1,133 @@
+> take key
+The key is colder than the room around it.
+
+> take coat
+You take the linen coat.
+
+> polish key
+You polish the key with the cuff of the linen coat until brass shows through the dark.
+
+> unlock box
+The polished key turns once in the wooden box. The lock gives up with a small domestic click.
+
+Rain moves across the glass in a pattern almost like handwriting.
+!flag wooden_box_unlocked
+
+> open box
+You open the wooden box. A folded rain-soft note waits inside.
+
+> take note from box
+You take the folded note.
+
+> read note
+The note says: When the glass forgets the garden, look for the pane that remembers rain.
+!flag rain_note_read
+!chapter names
+!scene rain_memory
+
+> north
+Hall
+
+The hall is long and glass-framed. The polished key throws a small gold mark ahead of you.
+
+You can see a caretaker.
+
+Available exits: east, south, west.
+
+The floorboards answer your first step with a tired creak.
+
+> east
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+Available exits: west.
+
+The conservatory air is warmer than the hall and much less alive.
+
+The rain repeats the note's rhythm against the glass.
+
+> look
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+Available exits: west.
+
+With the rain note in mind, you spot the cracked pane behind the empty planters.
+!contains cracked pane
+
+> read pane
+The crack is not lettering, but your eye keeps making a word from it: safe.
+!flag safe_means_trapped
+
+> use pane
+You ease the cracked pane inward. Behind it, a narrow stair climbs through the wall of glass. You climb into the upper house.
+!flag upstairs_route_found
+!room upstairs_landing
+!chapter ascent
+!scene upper_house
+
+> north
+The bedroom door stays shut, its glass knob cold under your hand.
+!room upstairs_landing
+
+> unlock door
+The polished key turns in the bedroom door with the reluctance of an old apology.
+!flag bedroom_door_unlocked
+
+> open door
+You open the bedroom door. Air slips out smelling of dust, linen, and rain that never reached the floor.
+!flag bedroom_door_open
+
+> north
+Locked Bedroom
+
+A narrow bed sits made and untouched. A covered mirror hangs over the washstand.
+
+You can see a covered mirror.
+
+Available exits: south.
+!room locked_bedroom
+
+> read mirror
+There is no writing on the mirror, but the dust along the sheet has settled into a line: let the room change.
+!flag mirror_message_read
+
+> use mirror
+You draw the sheet from the mirror. For a breath, it reflects the glass room instead of the bedroom.
+!flag bedroom_mirror_woken
+!scene mirror_memory
+
+> south
+Upstairs Landing
+
+The upstairs landing narrows between glass balustrades. The bedroom mirror has left a pale shape in the air.
+
+You can see a bedroom door.
+
+Available exits: down, north.
+
+> down
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+You can see a cracked pane.
+
+Available exits: west.
+
+> west
+Hall
+
+The hall is long and glass-framed. The polished key throws a small gold mark ahead of you.
+
+You can see a caretaker.
+
+Available exits: east, south, west.
+
+> ask caretaker about mirror
+"Mirrors are glass that learned to answer back," the caretaker says.
+
+> ask caretaker about bedroom
+"The room is open now," the caretaker says. "Be gentle with what it shows you."

@@ -1,0 +1,109 @@
+> look
+Foyer
+
+Rain needles the glass around the front door. A tarnished key waits on the little table.
+
+You can see a hall table, a linen coat, and a tarnished key.
+
+Available exits: east, north.
+
+> look on table
+On the hall table is a wooden box.
+
+> take key
+The key is colder than the room around it.
+
+> unlock box
+The tarnished key worries at the little lock, but the cuts are too dark with old brass.
+
+> take coat
+You take the linen coat.
+
+> polish key
+You polish the key with the cuff of the linen coat until brass shows through the dark.
+
+> unlock box
+The polished key turns once in the wooden box. The lock gives up with a small domestic click.
+
+Rain moves across the glass in a pattern almost like handwriting.
+!flag wooden_box_unlocked
+
+> open box
+You open the wooden box. A folded rain-soft note waits inside.
+
+> look in box
+In the wooden box is a folded note.
+!contains folded note
+
+> take note from box
+You take the folded note.
+
+> read note
+The note says: When the glass forgets the garden, look for the pane that remembers rain.
+!flag rain_note_read
+!chapter names
+!scene rain_memory
+
+> close box
+You close the wooden box, and the cedar smell is sealed away again.
+
+> north
+Hall
+
+The hall is long and glass-framed. The polished key throws a small gold mark ahead of you.
+
+You can see a caretaker.
+
+Available exits: east, south, west.
+
+The floorboards answer your first step with a tired creak.
+
+The rain repeats the note's rhythm against the glass.
+
+> show note to caretaker
+"I wondered where the house had put that," the caretaker says.
+
+> give note to caretaker
+The caretaker does not take the note. "You found it. Let it keep speaking to you."
+
+> ask caretaker about rain
+"Rain finds every failure in glass," the caretaker says. "That is why the house fears it."
+
+> tell caretaker about rain
+"Then follow the pane," the caretaker says. "But do not mistake safe for kind."
+
+> east
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+Available exits: west.
+
+The conservatory air is warmer than the hall and much less alive.
+
+> look
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+Available exits: west.
+
+With the rain note in mind, you spot the cracked pane behind the empty planters.
+!contains cracked pane
+
+> read pane
+The crack is not lettering, but your eye keeps making a word from it: safe.
+!flag safe_means_trapped
+
+> undo
+Undone.
+
+> look
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+You can see a cracked pane.
+
+Available exits: west.
+!not_contains safe

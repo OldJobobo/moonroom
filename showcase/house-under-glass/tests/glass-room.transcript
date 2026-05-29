@@ -1,0 +1,179 @@
+> take key
+The key is colder than the room around it.
+
+> take coat
+You take the linen coat.
+
+> polish key
+You polish the key with the cuff of the linen coat until brass shows through the dark.
+
+> east
+Study
+
+Dusty shelves lean over a desk scarred by old candle wax. A black ledger waits beneath the lamp.
+
+You can see a black ledger.
+
+Available exits: west.
+
+Rain moves across the glass in a pattern almost like handwriting.
+
+> read ledger
+The ledger lists owners in a narrow hand. The final entry has no name, only a water stain shaped like a key.
+
+Somewhere in the hall, the caretaker turns a page you cannot see.
+!flag ledger_read
+!chapter names
+
+> west
+Foyer
+
+Rain needles the glass around the front door. Study dust has found the cracks in the tile.
+
+You can see a hall table.
+
+Available exits: east, north.
+
+> unlock box
+The polished key turns once in the wooden box. The lock gives up with a small domestic click.
+
+> open box
+You open the wooden box. A folded rain-soft note waits inside.
+
+> take note from box
+You take the folded note.
+
+> read note
+The note says: When the glass forgets the garden, look for the pane that remembers rain.
+!flag rain_note_read
+!scene rain_memory
+
+> north
+Hall
+
+The hall is long and glass-framed. Rain sketches the names from the ledger against the panes.
+
+You can see a caretaker.
+
+Available exits: east, south, west.
+
+The floorboards answer your first step with a tired creak.
+
+> east
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+Available exits: west.
+
+The conservatory air is warmer than the hall and much less alive.
+
+The rain repeats the note's rhythm against the glass.
+
+> look
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+Available exits: west.
+
+With the rain note in mind, you spot the cracked pane behind the empty planters.
+!contains cracked pane
+
+> read pane
+The crack is not lettering, but your eye keeps making a word from it: safe.
+!flag safe_means_trapped
+
+> use pane
+You ease the cracked pane inward. Behind it, a narrow stair climbs through the wall of glass. You climb into the upper house.
+!flag upstairs_route_found
+!room upstairs_landing
+!chapter ascent
+!scene upper_house
+
+> unlock door
+The polished key turns in the bedroom door with the reluctance of an old apology.
+
+> open door
+You open the bedroom door. Air slips out smelling of dust, linen, and rain that never reached the floor.
+
+> north
+Locked Bedroom
+
+A narrow bed sits made and untouched. A covered mirror hangs over the washstand.
+
+You can see a covered mirror.
+
+Available exits: south.
+!room locked_bedroom
+
+> read mirror
+There is no writing on the mirror, but the dust along the sheet has settled into a line: let the room change.
+!flag mirror_message_read
+
+> use mirror
+You touch the mirror where the Glass Room waits in reflection. The surface gives way like cold water, and the room receives you without a sound.
+!flag glass_room_found
+!flag entered_glass_room
+!room glass_room
+!chapter release
+!scene glass_room
+
+> look
+Glass Room
+
+The Glass Room holds a preserved afternoon in impossible light. A ledger lies open on a plain table.
+
+You can see a memory ledger.
+
+Available exits: west.
+!contains memory ledger
+
+> read open ledger
+The page lists no owner. It only repeats one phrase in a narrowing hand: kept safe, kept safe, kept safe.
+!flag glass_ledger_read
+
+> close open ledger
+You close the ledger. The preserved afternoon exhales, and rain begins to sound like weather instead of memory.
+!flag house_released
+!chapter after_rain
+!scene house_released
+
+> west
+Locked Bedroom
+
+A narrow bed sits made and untouched. A covered mirror hangs over the washstand.
+
+You can see a covered mirror.
+
+Available exits: south.
+
+> south
+Upstairs Landing
+
+The upstairs landing narrows between glass balustrades. The bedroom door stands open, and the rain sounds farther away.
+
+You can see a bedroom door.
+
+Available exits: down, north.
+
+> down
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The cracked pane stands out now, a narrow wound in the careful room.
+
+You can see a cracked pane.
+
+Available exits: west.
+
+> west
+Hall
+
+The hall is long and glass-framed. Rain sketches the names from the ledger against the panes.
+
+You can see a caretaker.
+
+Available exits: east, south, west.
+
+> ask caretaker about glass room
+"Then it has remembered how to be a room," the caretaker says.

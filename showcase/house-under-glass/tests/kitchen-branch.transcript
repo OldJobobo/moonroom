@@ -1,0 +1,58 @@
+> north
+Hall
+
+The hall is long and glass-framed, with a caretaker standing where the shadows gather.
+
+You can see a caretaker.
+
+Available exits: east, south, west.
+
+The floorboards answer your first step with a tired creak.
+
+> west
+Kitchen
+
+The kitchen is narrow and white-tiled. Its cupboards are too orderly for a room that should have fed people.
+
+You can see a kitchen cabinet.
+
+Available exits: east.
+!room kitchen
+
+> open cabinet
+You open the kitchen cabinet. The hinges move without complaint.
+
+> look in cabinet
+In the kitchen cabinet is a pair of garden shears.
+!contains garden shears
+
+> take shears from cabinet
+You take the pair of garden shears.
+
+> east
+Hall
+
+The hall is long and glass-framed, with a caretaker standing where the shadows gather.
+
+You can see a caretaker.
+
+Available exits: east, south, west.
+
+> east
+Conservatory
+
+Glass ribs hold the rain above ranks of empty planters. The room smells of damp earth kept too long indoors.
+
+Available exits: west.
+
+The conservatory air is warmer than the hall and much less alive.
+!room conservatory
+
+> use shears
+You trim the dead stems away from the glass. Behind them, a cracked pane catches the rain.
+!flag garden_cut_back
+!contains cracked pane
+
+> read pane
+The crack is not lettering, but your eye keeps making a word from it: safe.
+!flag safe_means_trapped

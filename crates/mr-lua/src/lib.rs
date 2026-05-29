@@ -12,6 +12,7 @@ use mr_core::{
     GameError, GameEvent, GameMetadata, GameSettings, GameState, Room, Thing, ThingKind, World,
     random_bounded,
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LuaLoadError {
@@ -26,6 +27,15 @@ pub enum LuaLoadError {
 
     #[error("included Lua file '{include}' escapes game directory '{root}'")]
     IncludeEscapesRoot { include: PathBuf, root: PathBuf },
+
+    #[error("failed to parse Moonroom package '{path}': {source}")]
+    ParsePackage {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+
+    #[error("invalid Moonroom package '{path}': {message}")]
+    InvalidPackage { path: PathBuf, message: String },
 
     #[error(transparent)]
     Game(#[from] GameError),
@@ -51,6 +61,19 @@ pub enum LuaRunError {
         source: serde_json::Error,
     },
 
+    #[error("unsupported save format version {version} in '{path}'")]
+    UnsupportedSaveVersion { path: PathBuf, version: u32 },
+
+    #[error("unsupported save format '{format}' in '{path}'")]
+    UnsupportedSaveFormat { path: PathBuf, format: String },
+
+    #[error("save file '{path}' belongs to game '{save_game}', not '{current_game}'")]
+    WrongGame {
+        path: PathBuf,
+        save_game: String,
+        current_game: String,
+    },
+
     #[error("failed to encode save file '{path}': {source}")]
     EncodeSave {
         path: PathBuf,
@@ -64,6 +87,85 @@ pub enum LuaRunError {
     Lua(mlua::Error),
 }
 
+const SAVE_FORMAT: &str = "moonroom.save";
+const SAVE_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveOutputMode {
+    Pretty,
+    Compact,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SaveFile {
+    format: String,
+    version: u32,
+    game: SaveGameIdentity,
+    state: GameState,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SaveGameIdentity {
+    id: String,
+    title: String,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+pub const MOON_PACKAGE_FORMAT: &str = "moonroom.moon";
+pub const MOON_PACKAGE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone)]
+pub enum GameSource {
+    Directory(PathBuf),
+    Package(PathBuf),
+    Embedded(&'static [u8]),
+}
+
+impl GameSource {
+    pub fn from_path(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "moon")
+        {
+            Self::Package(path.to_path_buf())
+        } else {
+            Self::Directory(path.to_path_buf())
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MoonPackage {
+    format: String,
+    version: u32,
+    entry: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MoonPackageManifest {
+    format: String,
+    version: u32,
+    entry: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+}
+
+#[derive(Debug)]
+struct LoadedPackage {
+    entry: PathBuf,
+    files: BTreeMap<String, Vec<u8>>,
+}
+
 #[derive(Debug, Default)]
 struct LoadState {
     world: World,
@@ -71,12 +173,16 @@ struct LoadState {
     include_root: PathBuf,
     include_stack: Vec<PathBuf>,
     included_files: BTreeSet<PathBuf>,
+    package_files: Option<Rc<BTreeMap<String, Vec<u8>>>>,
 }
 
 #[derive(Debug, Default)]
 struct CallbackRegistry {
     before_action: Option<RegistryKey>,
     after_action: Option<RegistryKey>,
+    on_scene_start: Option<RegistryKey>,
+    on_scene_end: Option<RegistryKey>,
+    on_chapter: Option<RegistryKey>,
     room_desc: BTreeMap<String, RegistryKey>,
     on_enter: BTreeMap<String, RegistryKey>,
     on_look: BTreeMap<String, RegistryKey>,
@@ -103,6 +209,17 @@ pub struct LoadedGame {
     callbacks: CallbackRegistry,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackSummary {
+    pub global: Vec<&'static str>,
+    pub rooms: BTreeMap<String, Vec<&'static str>>,
+    pub things: BTreeMap<String, Vec<&'static str>>,
+    pub ask_topics: BTreeMap<String, Vec<String>>,
+    pub tell_topics: BTreeMap<String, Vec<String>>,
+    pub verbs: Vec<String>,
+    pub events: Vec<String>,
+}
+
 pub struct LuaGame {
     lua: Lua,
     game: Game,
@@ -113,6 +230,10 @@ pub struct LuaGame {
 
 pub fn load_game(path: impl AsRef<Path>) -> Result<World, LuaLoadError> {
     Ok(load_game_data(path)?.world)
+}
+
+pub fn load_game_source(source: GameSource) -> Result<World, LuaLoadError> {
+    Ok(load_game_data_from_source(source)?.world)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -146,6 +267,13 @@ enum ActionCallback {
     After,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SceneHook {
+    Start,
+    End,
+    Chapter,
+}
+
 #[derive(Debug, Clone)]
 enum ScriptCommand {
     Flag(String),
@@ -155,7 +283,11 @@ enum ScriptCommand {
     HideThing(String),
     RevealThing(String),
     Goto(String),
+    StartScene(String),
+    EndScene(Option<String>),
+    SetChapter(String),
     Schedule(u64, String),
+    ScheduleScene(u64, String, String),
     Cancel(String),
     SetRandomState(u64),
     SetActorMemory(String, String, i64),
@@ -172,6 +304,8 @@ struct ScriptSession {
     known_things: BTreeSet<String>,
     hidden_things: BTreeSet<String>,
     current_room: String,
+    current_scene: Option<String>,
+    current_chapter: Option<String>,
     visited_rooms: BTreeSet<String>,
     random_state: u64,
 }
@@ -188,6 +322,8 @@ impl ScriptSession {
             known_things: game.world().things.keys().cloned().collect(),
             hidden_things: game.state().hidden_things.clone(),
             current_room: game.state().current_room.clone(),
+            current_scene: game.state().current_scene.clone(),
+            current_chapter: game.state().current_chapter.clone(),
             visited_rooms: game.state().visited_rooms.clone(),
             random_state: game.state().random_state,
         }
@@ -199,6 +335,17 @@ impl LuaGame {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, LuaLoadError> {
         let loaded = load_game_data(path)?;
+
+        Self::from_loaded_game(loaded)
+    }
+
+    pub fn load_source(source: GameSource) -> Result<Self, LuaLoadError> {
+        let loaded = load_game_data_from_source(source)?;
+
+        Self::from_loaded_game(loaded)
+    }
+
+    fn from_loaded_game(loaded: LoadedGame) -> Result<Self, LuaLoadError> {
         let game = Game::new(loaded.world)?;
 
         Ok(Self {
@@ -223,6 +370,52 @@ impl LuaGame {
         self.game.current_room_id()
     }
 
+    pub fn world(&self) -> &World {
+        self.game.world()
+    }
+
+    pub fn callback_summary(&self) -> CallbackSummary {
+        let mut global = Vec::new();
+
+        if self.callbacks.before_action.is_some() {
+            global.push("before_action");
+        }
+
+        if self.callbacks.after_action.is_some() {
+            global.push("after_action");
+        }
+
+        if self.callbacks.on_scene_start.is_some() {
+            global.push("on_scene_start");
+        }
+
+        if self.callbacks.on_scene_end.is_some() {
+            global.push("on_scene_end");
+        }
+
+        if self.callbacks.on_chapter.is_some() {
+            global.push("on_chapter");
+        }
+
+        CallbackSummary {
+            global,
+            rooms: self.room_callback_summary(),
+            things: self.thing_callback_summary(),
+            ask_topics: topic_callback_summary(&self.callbacks.ask_topics),
+            tell_topics: topic_callback_summary(&self.callbacks.tell_topics),
+            verbs: self.callbacks.verbs.keys().cloned().collect(),
+            events: self.callbacks.events.keys().cloned().collect(),
+        }
+    }
+
+    pub fn current_scene(&self) -> Option<&str> {
+        self.game.current_scene()
+    }
+
+    pub fn current_chapter(&self) -> Option<&str> {
+        self.game.current_chapter()
+    }
+
     pub fn has_flag(&self, name: &str) -> bool {
         self.game.has_flag(name)
     }
@@ -231,13 +424,34 @@ impl LuaGame {
         self.game.counter(name)
     }
 
+    pub fn set_random_seed(&mut self, seed: u64) {
+        self.game.set_random_seed(seed);
+        self.clear_history();
+    }
+
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), LuaRunError> {
+        self.save_to_path_with_mode(path, SaveOutputMode::Pretty)
+    }
+
+    pub fn save_to_path_with_mode(
+        &self,
+        path: impl AsRef<Path>,
+        mode: SaveOutputMode,
+    ) -> Result<(), LuaRunError> {
         let path = path.as_ref();
-        let json = serde_json::to_string_pretty(self.game.state()).map_err(|source| {
-            LuaRunError::EncodeSave {
-                path: path.to_path_buf(),
-                source,
-            }
+        let save = SaveFile {
+            format: SAVE_FORMAT.to_string(),
+            version: SAVE_FORMAT_VERSION,
+            game: self.save_game_identity(),
+            state: self.game.state().clone(),
+        };
+        let json = match mode {
+            SaveOutputMode::Pretty => serde_json::to_string_pretty(&save),
+            SaveOutputMode::Compact => serde_json::to_string(&save),
+        }
+        .map_err(|source| LuaRunError::EncodeSave {
+            path: path.to_path_buf(),
+            source,
         })?;
 
         fs::write(path, json).map_err(|source| LuaRunError::WriteSave {
@@ -246,17 +460,98 @@ impl LuaGame {
         })
     }
 
+    pub fn save_preview_with_mode(&self, mode: SaveOutputMode) -> Result<String, LuaRunError> {
+        let save = SaveFile {
+            format: SAVE_FORMAT.to_string(),
+            version: SAVE_FORMAT_VERSION,
+            game: self.save_game_identity(),
+            state: self.game.state().clone(),
+        };
+
+        match mode {
+            SaveOutputMode::Pretty => serde_json::to_string_pretty(&save),
+            SaveOutputMode::Compact => serde_json::to_string(&save),
+        }
+        .map_err(|source| LuaRunError::EncodeSave {
+            path: PathBuf::from("<memory>"),
+            source,
+        })
+    }
+
+    fn save_game_identity(&self) -> SaveGameIdentity {
+        let metadata = self
+            .game
+            .world()
+            .metadata
+            .as_ref()
+            .expect("loaded games have validated metadata");
+
+        SaveGameIdentity {
+            id: metadata
+                .id
+                .clone()
+                .unwrap_or_else(|| metadata.title.clone()),
+            title: metadata.title.clone(),
+            version: metadata.version.clone(),
+        }
+    }
+
+    fn state_from_save_json(&self, path: &Path, json: &str) -> Result<GameState, LuaRunError> {
+        let value = serde_json::from_str::<serde_json::Value>(json).map_err(|source| {
+            LuaRunError::ParseSave {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+
+        if value.get("state").is_none() {
+            return serde_json::from_value::<GameState>(value).map_err(|source| {
+                LuaRunError::ParseSave {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            });
+        }
+
+        let save =
+            serde_json::from_value::<SaveFile>(value).map_err(|source| LuaRunError::ParseSave {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+        if save.format != SAVE_FORMAT {
+            return Err(LuaRunError::UnsupportedSaveFormat {
+                path: path.to_path_buf(),
+                format: save.format,
+            });
+        }
+
+        if save.version != SAVE_FORMAT_VERSION {
+            return Err(LuaRunError::UnsupportedSaveVersion {
+                path: path.to_path_buf(),
+                version: save.version,
+            });
+        }
+
+        let current = self.save_game_identity();
+        if save.game.id != current.id {
+            return Err(LuaRunError::WrongGame {
+                path: path.to_path_buf(),
+                save_game: save.game.id,
+                current_game: current.id,
+            });
+        }
+
+        Ok(save.state)
+    }
+
     pub fn load_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), LuaRunError> {
         let path = path.as_ref();
         let json = fs::read_to_string(path).map_err(|source| LuaRunError::ReadSave {
             path: path.to_path_buf(),
             source,
         })?;
-        let state =
-            serde_json::from_str::<GameState>(&json).map_err(|source| LuaRunError::ParseSave {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        let state = self.state_from_save_json(path, &json)?;
 
         self.game.replace_state(state)?;
         self.clear_history();
@@ -458,6 +753,40 @@ impl LuaGame {
         self.undo_stack.clear();
         self.last_command = None;
         self.game.clear_history();
+    }
+
+    fn room_callback_summary(&self) -> BTreeMap<String, Vec<&'static str>> {
+        let mut rooms = BTreeMap::<String, Vec<&'static str>>::new();
+
+        for room_id in self.callbacks.room_desc.keys() {
+            rooms.entry(room_id.clone()).or_default().push("desc");
+        }
+
+        for room_id in self.callbacks.on_enter.keys() {
+            rooms.entry(room_id.clone()).or_default().push("on_enter");
+        }
+
+        for room_id in self.callbacks.on_look.keys() {
+            rooms.entry(room_id.clone()).or_default().push("on_look");
+        }
+
+        rooms
+    }
+
+    fn thing_callback_summary(&self) -> BTreeMap<String, Vec<&'static str>> {
+        let mut things = BTreeMap::<String, Vec<&'static str>>::new();
+        add_callback_names(&mut things, &self.callbacks.on_take, "on_take");
+        add_callback_names(&mut things, &self.callbacks.on_drop, "on_drop");
+        add_callback_names(&mut things, &self.callbacks.on_use, "on_use");
+        add_callback_names(&mut things, &self.callbacks.on_read, "on_read");
+        add_callback_names(&mut things, &self.callbacks.on_open, "on_open");
+        add_callback_names(&mut things, &self.callbacks.on_close, "on_close");
+        add_callback_names(&mut things, &self.callbacks.on_lock, "on_lock");
+        add_callback_names(&mut things, &self.callbacks.on_unlock, "on_unlock");
+        add_callback_names(&mut things, &self.callbacks.on_talk, "on_talk");
+        add_callback_names(&mut things, &self.callbacks.on_show, "on_show");
+        add_callback_names(&mut things, &self.callbacks.on_give, "on_give");
+        things
     }
 
     fn render_room(&mut self) -> Result<String, LuaRunError> {
@@ -681,6 +1010,29 @@ impl LuaGame {
         self.take_script_output(&session)
     }
 
+    fn run_scene_hook(
+        &mut self,
+        kind: SceneHook,
+        name: &str,
+    ) -> Result<Option<String>, LuaRunError> {
+        let callback = match kind {
+            SceneHook::Start => self.callbacks.on_scene_start.as_ref(),
+            SceneHook::End => self.callbacks.on_scene_end.as_ref(),
+            SceneHook::Chapter => self.callbacks.on_chapter.as_ref(),
+        };
+        let Some(callback) = callback else {
+            return Ok(None);
+        };
+
+        let function = self
+            .lua
+            .registry_value::<Function>(callback)
+            .map_err(LuaRunError::Lua)?;
+        let (api, session) = self.game_api().map_err(LuaRunError::Lua)?;
+        function.call::<()>((api, name)).map_err(LuaRunError::Lua)?;
+        self.take_script_output(&session)
+    }
+
     fn game_api(&self) -> mlua::Result<(Table, Rc<RefCell<ScriptSession>>)> {
         let api = self.lua.create_table()?;
         let session = Rc::new(RefCell::new(ScriptSession::from_game(&self.game)));
@@ -855,6 +1207,58 @@ impl LuaGame {
             })?,
         )?;
 
+        let scene_session = Rc::clone(&session);
+        api.set(
+            "scene",
+            self.lua.create_function(move |_lua, ()| {
+                Ok(scene_session.borrow().current_scene.clone())
+            })?,
+        )?;
+
+        let start_scene_session = Rc::clone(&session);
+        api.set(
+            "start_scene",
+            self.lua.create_function(move |_lua, name: String| {
+                let mut session = start_scene_session.borrow_mut();
+                session.current_scene = Some(name.clone());
+                session.commands.push(ScriptCommand::StartScene(name));
+                Ok(())
+            })?,
+        )?;
+
+        let end_scene_session = Rc::clone(&session);
+        api.set(
+            "end_scene",
+            self.lua
+                .create_function(move |_lua, name: Option<String>| {
+                    let mut session = end_scene_session.borrow_mut();
+                    let target = name.or_else(|| session.current_scene.clone());
+
+                    if target.is_some() {
+                        session.current_scene = None;
+                        session.commands.push(ScriptCommand::EndScene(target));
+                    }
+
+                    Ok(())
+                })?,
+        )?;
+
+        let chapter_session = Rc::clone(&session);
+        api.set(
+            "chapter",
+            self.lua
+                .create_function(move |_lua, name: Option<String>| {
+                    let mut session = chapter_session.borrow_mut();
+
+                    if let Some(name) = name {
+                        session.current_chapter = Some(name.clone());
+                        session.commands.push(ScriptCommand::SetChapter(name));
+                    }
+
+                    Ok(session.current_chapter.clone())
+                })?,
+        )?;
+
         let schedule_session = Rc::clone(&session);
         api.set(
             "schedule",
@@ -864,6 +1268,26 @@ impl LuaGame {
                         .borrow_mut()
                         .commands
                         .push(ScriptCommand::Schedule(turns, event_name));
+                    Ok(())
+                })?,
+        )?;
+
+        let schedule_scene_session = Rc::clone(&session);
+        api.set(
+            "schedule_scene",
+            self.lua
+                .create_function(move |_lua, (turns, event_name): (u64, String)| {
+                    let scene = schedule_scene_session
+                        .borrow()
+                        .current_scene
+                        .clone()
+                        .ok_or_else(|| {
+                            mlua::Error::runtime("game.schedule_scene requires an active scene")
+                        })?;
+                    schedule_scene_session
+                        .borrow_mut()
+                        .commands
+                        .push(ScriptCommand::ScheduleScene(turns, event_name, scene));
                     Ok(())
                 })?,
         )?;
@@ -1004,8 +1428,30 @@ impl LuaGame {
                     self.game.reveal_thing(&thing_id);
                 }
                 ScriptCommand::Goto(room_id) => self.game.goto(&room_id)?,
+                ScriptCommand::StartScene(name) => {
+                    self.game.start_scene(name.clone());
+                    if let Some(output) = self.run_scene_hook(SceneHook::Start, &name)? {
+                        session.borrow_mut().output.push(output);
+                    }
+                }
+                ScriptCommand::EndScene(name) => {
+                    if let Some(ended) = self.game.end_scene(name.as_deref())
+                        && let Some(output) = self.run_scene_hook(SceneHook::End, &ended)?
+                    {
+                        session.borrow_mut().output.push(output);
+                    }
+                }
+                ScriptCommand::SetChapter(name) => {
+                    self.game.set_chapter(name.clone());
+                    if let Some(output) = self.run_scene_hook(SceneHook::Chapter, &name)? {
+                        session.borrow_mut().output.push(output);
+                    }
+                }
                 ScriptCommand::Schedule(turns, event_name) => {
                     self.game.schedule_event(turns, event_name);
+                }
+                ScriptCommand::ScheduleScene(turns, event_name, scene) => {
+                    self.game.schedule_scene_event(turns, event_name, scene);
                 }
                 ScriptCommand::Cancel(event_name) => self.game.cancel_event(&event_name),
                 ScriptCommand::SetRandomState(random_state) => {
@@ -1059,6 +1505,327 @@ fn load_game_data(path: impl AsRef<Path>) -> Result<LoadedGame, LuaLoadError> {
     })
 }
 
+fn load_game_data_from_source(source: GameSource) -> Result<LoadedGame, LuaLoadError> {
+    match source {
+        GameSource::Directory(path) => load_game_data(path.join("game.lua")),
+        GameSource::Package(path) => {
+            let bytes = fs::read(&path).map_err(|source| LuaLoadError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let package = decode_moon_package(&path, &bytes)?;
+            load_game_data_from_package(&path, package)
+        }
+        GameSource::Embedded(bytes) => {
+            let path = PathBuf::from("<embedded .moon>");
+            let package = decode_moon_package(&path, bytes)?;
+            load_game_data_from_package(&path, package)
+        }
+    }
+}
+
+fn load_game_data_from_package(
+    package_path: &Path,
+    package: LoadedPackage,
+) -> Result<LoadedGame, LuaLoadError> {
+    let entrypoint = package.entry;
+    let files = Rc::new(package.files);
+    let lua = Lua::new();
+    let state = Rc::new(RefCell::new(LoadState {
+        include_root: package_path.to_path_buf(),
+        package_files: Some(Rc::clone(&files)),
+        ..LoadState::default()
+    }));
+
+    register_dsl(&lua, Rc::clone(&state)).map_err(|source| LuaLoadError::Lua {
+        path: entrypoint.clone(),
+        source,
+    })?;
+
+    load_lua_file(&lua, Rc::clone(&state), entrypoint)?;
+
+    let mut state = state.borrow_mut();
+    let world = std::mem::take(&mut state.world);
+    let callbacks = std::mem::take(&mut state.callbacks);
+    drop(state);
+
+    Ok(LoadedGame {
+        lua,
+        world,
+        callbacks,
+    })
+}
+
+pub fn pack_game_directory(
+    game_dir: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+) -> Result<(), LuaLoadError> {
+    let bytes = pack_game_directory_to_bytes(game_dir)?;
+    let output = output.as_ref();
+
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|source| LuaLoadError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    fs::write(output, bytes).map_err(|source| LuaLoadError::Io {
+        path: output.to_path_buf(),
+        source,
+    })
+}
+
+pub fn pack_game_directory_to_bytes(game_dir: impl AsRef<Path>) -> Result<Vec<u8>, LuaLoadError> {
+    let game_dir = game_dir.as_ref();
+    let root = fs::canonicalize(game_dir).map_err(|source| LuaLoadError::Io {
+        path: game_dir.to_path_buf(),
+        source,
+    })?;
+    let world = load_game_source(GameSource::Directory(root.clone()))?;
+    let metadata = world.metadata.as_ref();
+    let mut files = BTreeMap::new();
+
+    collect_package_files(&root, &root, &mut files)?;
+
+    if !files.contains_key("game.lua") {
+        return Err(LuaLoadError::InvalidPackage {
+            path: game_dir.to_path_buf(),
+            message: "game directory must contain game.lua".to_string(),
+        });
+    }
+
+    let title = metadata.map(|metadata| metadata.title.clone());
+    let author = metadata.and_then(|metadata| metadata.author.clone());
+    let manifest = MoonPackageManifest {
+        format: MOON_PACKAGE_FORMAT.to_string(),
+        version: MOON_PACKAGE_VERSION,
+        entry: "game.lua".to_string(),
+        title: title.clone(),
+        author: author.clone(),
+    };
+    let manifest_json =
+        serde_json::to_vec_pretty(&manifest).map_err(|source| LuaLoadError::ParsePackage {
+            path: game_dir.to_path_buf(),
+            source,
+        })?;
+    files.insert("moon.json".to_string(), hex_encode(&manifest_json));
+
+    let package = MoonPackage {
+        format: MOON_PACKAGE_FORMAT.to_string(),
+        version: MOON_PACKAGE_VERSION,
+        entry: "game.lua".to_string(),
+        title,
+        author,
+        files,
+    };
+
+    serde_json::to_vec_pretty(&package).map_err(|source| LuaLoadError::ParsePackage {
+        path: game_dir.to_path_buf(),
+        source,
+    })
+}
+
+pub fn unpack_game_package(
+    package_path: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<(), LuaLoadError> {
+    let package_path = package_path.as_ref();
+    let output_dir = output_dir.as_ref();
+    let package = read_moon_package(package_path)?;
+
+    if output_dir.exists()
+        && output_dir
+            .read_dir()
+            .map_err(|source| LuaLoadError::Io {
+                path: output_dir.to_path_buf(),
+                source,
+            })?
+            .next()
+            .is_some()
+    {
+        return Err(LuaLoadError::InvalidPackage {
+            path: output_dir.to_path_buf(),
+            message: "unpack output directory already exists and is not empty".to_string(),
+        });
+    }
+
+    fs::create_dir_all(output_dir).map_err(|source| LuaLoadError::Io {
+        path: output_dir.to_path_buf(),
+        source,
+    })?;
+
+    for (path, bytes) in package.files {
+        let relative =
+            normalize_package_path(path).map_err(|message| LuaLoadError::InvalidPackage {
+                path: package_path.to_path_buf(),
+                message,
+            })?;
+        let output_path = output_dir.join(relative);
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| LuaLoadError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        fs::write(&output_path, bytes).map_err(|source| LuaLoadError::Io {
+            path: output_path,
+            source,
+        })?;
+    }
+
+    Ok(())
+}
+
+pub fn package_file_names(package_path: impl AsRef<Path>) -> Result<Vec<String>, LuaLoadError> {
+    let package = read_moon_package(package_path)?;
+
+    Ok(package.files.keys().cloned().collect())
+}
+
+pub fn package_file_text(
+    package_path: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+) -> Result<String, LuaLoadError> {
+    let package_path = package_path.as_ref();
+    let file = normalize_package_path(file).map_err(|message| LuaLoadError::InvalidPackage {
+        path: package_path.to_path_buf(),
+        message,
+    })?;
+    let package = read_moon_package(package_path)?;
+    let key = package_path_key(&file);
+    let Some(bytes) = package.files.get(&key) else {
+        return Err(LuaLoadError::InvalidPackage {
+            path: package_path.to_path_buf(),
+            message: format!("package does not contain '{key}'"),
+        });
+    };
+
+    String::from_utf8(bytes.clone()).map_err(|_| LuaLoadError::InvalidPackage {
+        path: package_path.to_path_buf(),
+        message: format!("package file '{key}' is not valid UTF-8"),
+    })
+}
+
+fn collect_package_files(
+    root: &Path,
+    dir: &Path,
+    files: &mut BTreeMap<String, String>,
+) -> Result<(), LuaLoadError> {
+    let mut entries = Vec::new();
+
+    for entry in fs::read_dir(dir).map_err(|source| LuaLoadError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| LuaLoadError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        entries.push(entry.path());
+    }
+
+    entries.sort();
+
+    for path in entries {
+        let metadata = fs::metadata(&path).map_err(|source| LuaLoadError::Io {
+            path: path.clone(),
+            source,
+        })?;
+
+        if metadata.is_dir() {
+            collect_package_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| LuaLoadError::InvalidPackage {
+                    path: root.to_path_buf(),
+                    message: format!("package file '{}' escaped the game root", path.display()),
+                })?;
+            let relative = normalize_package_path(relative).map_err(|message| {
+                LuaLoadError::InvalidPackage {
+                    path: root.to_path_buf(),
+                    message,
+                }
+            })?;
+            let bytes = fs::read(&path).map_err(|source| LuaLoadError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+            files.insert(package_path_key(&relative), hex_encode(&bytes));
+        }
+    }
+
+    Ok(())
+}
+
+fn read_moon_package(path: impl AsRef<Path>) -> Result<LoadedPackage, LuaLoadError> {
+    let path = path.as_ref();
+    let bytes = fs::read(path).map_err(|source| LuaLoadError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    decode_moon_package(path, &bytes)
+}
+
+fn decode_moon_package(path: &Path, bytes: &[u8]) -> Result<LoadedPackage, LuaLoadError> {
+    let package: MoonPackage =
+        serde_json::from_slice(bytes).map_err(|source| LuaLoadError::ParsePackage {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    if package.format != MOON_PACKAGE_FORMAT {
+        return Err(LuaLoadError::InvalidPackage {
+            path: path.to_path_buf(),
+            message: format!("unsupported package format '{}'", package.format),
+        });
+    }
+
+    if package.version != MOON_PACKAGE_VERSION {
+        return Err(LuaLoadError::InvalidPackage {
+            path: path.to_path_buf(),
+            message: format!("unsupported package version {}", package.version),
+        });
+    }
+
+    let entry =
+        normalize_package_path(&package.entry).map_err(|message| LuaLoadError::InvalidPackage {
+            path: path.to_path_buf(),
+            message,
+        })?;
+    let mut files = BTreeMap::new();
+
+    for (file_path, encoded) in package.files {
+        let file_path =
+            normalize_package_path(file_path).map_err(|message| LuaLoadError::InvalidPackage {
+                path: path.to_path_buf(),
+                message,
+            })?;
+        let bytes = hex_decode(&encoded).map_err(|message| LuaLoadError::InvalidPackage {
+            path: path.to_path_buf(),
+            message,
+        })?;
+
+        files.insert(package_path_key(&file_path), bytes);
+    }
+
+    if !files.contains_key(&package_path_key(&entry)) {
+        return Err(LuaLoadError::InvalidPackage {
+            path: path.to_path_buf(),
+            message: format!("package entry '{}' is missing", entry.display()),
+        });
+    }
+
+    Ok(LoadedPackage { entry, files })
+}
+
 fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
     let globals = lua.globals();
 
@@ -1072,11 +1839,16 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
     let game = lua.create_function(move |lua, table: Table| {
         let before_action = table.get::<Option<Function>>("before_action")?;
         let after_action = table.get::<Option<Function>>("after_action")?;
+        let on_scene_start = table.get::<Option<Function>>("on_scene_start")?;
+        let on_scene_end = table.get::<Option<Function>>("on_scene_end")?;
+        let on_chapter = table.get::<Option<Function>>("on_chapter")?;
         let mut state = game_state.borrow_mut();
         state.world.metadata = Some(GameMetadata {
             title: table.get("title")?,
             author: table.get("author")?,
             start: table.get("start")?,
+            id: table.get("id")?,
+            version: table.get("version")?,
         });
         state.world.settings = table
             .get::<Option<Table>>("settings")?
@@ -1090,6 +1862,18 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
 
         if let Some(after_action) = after_action {
             state.callbacks.after_action = Some(lua.create_registry_value(after_action)?);
+        }
+
+        if let Some(on_scene_start) = on_scene_start {
+            state.callbacks.on_scene_start = Some(lua.create_registry_value(on_scene_start)?);
+        }
+
+        if let Some(on_scene_end) = on_scene_end {
+            state.callbacks.on_scene_end = Some(lua.create_registry_value(on_scene_end)?);
+        }
+
+        if let Some(on_chapter) = on_chapter {
+            state.callbacks.on_chapter = Some(lua.create_registry_value(on_chapter)?);
         }
 
         Ok(())
@@ -1398,21 +2182,33 @@ fn include_lua_file(
             ));
         };
 
-        base.join(relative_path)
+        if state.package_files.is_some() {
+            normalize_package_path(base.join(relative_path)).map_err(|message| {
+                mlua::Error::runtime(format!("failed to include '{relative_path}': {message}"))
+            })?
+        } else {
+            base.join(relative_path)
+        }
     };
 
-    let path = fs::canonicalize(&path).map_err(|source| {
-        mlua::Error::runtime(format!(
-            "failed to read included Lua file '{}': {source}",
-            path.display()
-        ))
-    })?;
+    let path = if state.borrow().package_files.is_some() {
+        path
+    } else {
+        fs::canonicalize(&path).map_err(|source| {
+            mlua::Error::runtime(format!(
+                "failed to read included Lua file '{}': {source}",
+                path.display()
+            ))
+        })?
+    };
 
     {
         let state = state.borrow();
-        ensure_path_in_root(&state.include_root, &path).map_err(|err| {
-            mlua::Error::runtime(format!("failed to include '{}': {err}", path.display()))
-        })?;
+        if state.package_files.is_none() {
+            ensure_path_in_root(&state.include_root, &path).map_err(|err| {
+                mlua::Error::runtime(format!("failed to include '{}': {err}", path.display()))
+            })?;
+        }
 
         if state.include_stack.contains(&path) {
             return Err(mlua::Error::runtime(format!(
@@ -1441,10 +2237,29 @@ fn load_lua_file(
     }
 
     let result = (|| {
-        let source = fs::read_to_string(&path).map_err(|source| LuaLoadError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let source = {
+            let state = state.borrow();
+
+            if let Some(files) = &state.package_files {
+                let key = package_path_key(&path);
+                let Some(bytes) = files.get(&key) else {
+                    return Err(LuaLoadError::InvalidPackage {
+                        path: state.include_root.clone(),
+                        message: format!("missing Lua file '{}'", path.display()),
+                    });
+                };
+
+                String::from_utf8(bytes.clone()).map_err(|_| LuaLoadError::InvalidPackage {
+                    path: state.include_root.clone(),
+                    message: format!("Lua file '{}' is not valid UTF-8", path.display()),
+                })?
+            } else {
+                fs::read_to_string(&path).map_err(|source| LuaLoadError::Io {
+                    path: path.clone(),
+                    source,
+                })?
+            }
+        };
 
         lua.load(&source)
             .set_name(path.display().to_string())
@@ -1468,6 +2283,82 @@ fn ensure_path_in_root(root: &Path, path: &Path) -> Result<(), LuaLoadError> {
         include: path.to_path_buf(),
         root: root.to_path_buf(),
     })
+}
+
+fn normalize_package_path(path: impl AsRef<Path>) -> Result<PathBuf, String> {
+    let path = path.as_ref();
+
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err("package paths must be relative".to_string());
+    }
+
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(format!(
+                    "package path '{}' escapes the root",
+                    path.display()
+                ));
+            }
+            _ => return Err(format!("invalid package path '{}'", path.display())),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err("package paths must not be empty".to_string());
+    }
+
+    Ok(normalized)
+}
+
+fn package_path_key(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        encoded.push(DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+
+    encoded
+}
+
+fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
+    if !text.len().is_multiple_of(2) {
+        return Err("hex package payload has an odd length".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    let mut chars = text.bytes();
+
+    while let Some(high) = chars.next() {
+        let low = chars.next().expect("hex length was checked");
+        let high = hex_value(high)?;
+        let low = hex_value(low)?;
+        bytes.push((high << 4) | low);
+    }
+
+    Ok(bytes)
+}
+
+fn hex_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("hex package payload contains a non-hex character".to_string()),
+    }
 }
 
 fn table_to_exit_map(table: Table) -> mlua::Result<BTreeMap<String, Exit>> {
@@ -1544,6 +2435,25 @@ fn append_output(mut first: String, second: String) -> String {
     }
 
     first
+}
+
+fn add_callback_names(
+    callbacks: &mut BTreeMap<String, Vec<&'static str>>,
+    source: &BTreeMap<String, RegistryKey>,
+    name: &'static str,
+) {
+    for id in source.keys() {
+        callbacks.entry(id.clone()).or_default().push(name);
+    }
+}
+
+fn topic_callback_summary(
+    source: &BTreeMap<String, BTreeMap<String, RegistryKey>>,
+) -> BTreeMap<String, Vec<String>> {
+    source
+        .iter()
+        .map(|(actor_id, topics)| (actor_id.clone(), topics.keys().cloned().collect()))
+        .collect()
 }
 
 fn is_quit_command(input: &str) -> bool {
@@ -1632,6 +2542,19 @@ thing "caretaker" {
       end
     }
   }
+}
+"#;
+
+    const SAVE_ID_TEST_GAME: &str = r#"
+game {
+  id = "GAME_ID",
+  title = "Save Identity Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
 }
 "#;
 
@@ -1835,6 +2758,59 @@ thing "coin" {
 
         assert!(game.game.world().rooms.contains_key("start"));
         assert!(game.game.world().things.contains_key("coin"));
+    }
+
+    #[test]
+    fn moon_packages_load_project_local_includes() {
+        let game_dir =
+            std::env::temp_dir().join(format!("moonroom-package-test-{}", process::id()));
+        let package_path = game_dir.with_extension("moon");
+        let unpacked_dir =
+            game_dir.with_file_name(format!("moonroom-package-unpack-test-{}", process::id()));
+        fs::create_dir_all(&game_dir).expect("test game dir should create");
+        fs::write(
+            game_dir.join("game.lua"),
+            r#"
+game {
+  title = "Package Test",
+  start = "start"
+}
+
+include "rooms/start.lua"
+"#,
+        )
+        .expect("entrypoint should write");
+        fs::create_dir_all(game_dir.join("rooms")).expect("rooms dir should create");
+        fs::write(
+            game_dir.join("rooms").join("start.lua"),
+            r#"
+room "start" {
+  name = "Start",
+  desc = "A packaged room."
+}
+"#,
+        )
+        .expect("room file should write");
+
+        pack_game_directory(&game_dir, &package_path).expect("package should write");
+        let mut game = LuaGame::load_source(GameSource::Package(package_path.clone()))
+            .expect("packaged game should load");
+        let opening = game.opening().expect("opening should render");
+
+        assert!(opening.contains("A packaged room."));
+        assert!(
+            package_file_names(&package_path)
+                .expect("package files should list")
+                .contains(&"moon.json".to_string())
+        );
+
+        unpack_game_package(&package_path, &unpacked_dir).expect("package should unpack");
+        assert!(unpacked_dir.join("game.lua").exists());
+        assert!(unpacked_dir.join("moon.json").exists());
+
+        let _ = fs::remove_dir_all(game_dir);
+        let _ = fs::remove_file(package_path);
+        let _ = fs::remove_dir_all(unpacked_dir);
     }
 
     #[test]
@@ -2081,6 +3057,193 @@ verb "search" {
         assert_eq!(outcome.output, "The caretaker accepts the coin.");
         assert_eq!(game.game.actor_memory("caretaker", "given:coin"), 1);
         assert!(!game.game.has("coin"));
+    }
+
+    #[test]
+    fn callbacks_can_manage_scenes_chapters_and_scene_timers() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-scene-test-{}.lua", process::id()));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  title = "Scene Test",
+  start = "start",
+
+  on_scene_start = function(game, scene)
+    game.say("Scene started: " .. scene .. ".")
+  end,
+
+  on_scene_end = function(game, scene)
+    game.say("Scene ended: " .. scene .. ".")
+  end,
+
+  on_chapter = function(game, chapter)
+    game.say("Chapter: " .. chapter .. ".")
+  end
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
+}
+
+verb "begin" {
+  on_action = function(game)
+    game.chapter("arrival")
+    game.start_scene("opening")
+    game.schedule_scene(1, "bell")
+    game.say("The scene begins.")
+  end
+}
+
+verb "wait" {
+  on_action = function(game)
+    game.say("You wait in " .. game.scene() .. ".")
+  end
+}
+
+verb "leave" {
+  on_action = function(game)
+    game.end_scene("opening")
+  end
+}
+
+event "bell" {
+  on_trigger = function(game)
+    game.say("A scene bell rings.")
+  end
+}
+"#,
+        )
+        .expect("test game file should write");
+
+        let mut game = LuaGame::load(&game_file).expect("scene game loads");
+        let CommandResult::Continue(outcome) =
+            game.handle_command("begin").expect("begin succeeds")
+        else {
+            panic!("begin should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "The scene begins.\nChapter: arrival.\nScene started: opening."
+        );
+        assert_eq!(game.current_chapter(), Some("arrival"));
+        assert_eq!(game.current_scene(), Some("opening"));
+
+        let CommandResult::Continue(outcome) = game.handle_command("wait").expect("wait succeeds")
+        else {
+            panic!("wait should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "You wait in opening.\n\nA scene bell rings."
+        );
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("leave").expect("leave succeeds")
+        else {
+            panic!("leave should continue");
+        };
+        assert_eq!(outcome.output, "Scene ended: opening.");
+        assert_eq!(game.current_scene(), None);
+    }
+
+    #[test]
+    fn save_files_are_versioned_and_keep_loading_legacy_state() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-save-test-{}.lua", process::id()));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  id = "save-test",
+  version = "1.0.0",
+  title = "Save Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
+}
+
+thing "coin" {
+  name = "coin",
+  aliases = { "coin" },
+  location = "start",
+  portable = true
+}
+"#,
+        )
+        .expect("test game file should write");
+
+        let save_file =
+            std::env::temp_dir().join(format!("moonroom-save-test-{}.json", process::id()));
+        let legacy_file =
+            std::env::temp_dir().join(format!("moonroom-legacy-save-test-{}.json", process::id()));
+        let compact_file =
+            std::env::temp_dir().join(format!("moonroom-compact-save-test-{}.json", process::id()));
+
+        let mut game = LuaGame::load(&game_file).expect("save game loads");
+        game.handle_command("take coin").expect("take succeeds");
+        game.save_to_path(&save_file).expect("save succeeds");
+
+        let saved = fs::read_to_string(&save_file).expect("save should read");
+        assert!(saved.contains(r#""format": "moonroom.save""#));
+        assert!(saved.contains(r#""version": 1"#));
+        assert!(saved.contains(r#""id": "save-test""#));
+
+        let mut loaded = LuaGame::load(&game_file).expect("save game reloads");
+        loaded.load_from_path(&save_file).expect("load succeeds");
+        assert!(loaded.game.has("coin"));
+
+        fs::write(
+            &legacy_file,
+            serde_json::to_string(game.game.state()).expect("legacy state should encode"),
+        )
+        .expect("legacy save should write");
+        let mut legacy_loaded = LuaGame::load(&game_file).expect("save game reloads");
+        legacy_loaded
+            .load_from_path(&legacy_file)
+            .expect("legacy load succeeds");
+        assert!(legacy_loaded.game.has("coin"));
+
+        game.save_to_path_with_mode(&compact_file, SaveOutputMode::Compact)
+            .expect("compact save succeeds");
+        let compact = fs::read_to_string(&compact_file).expect("compact save should read");
+        assert!(!compact.contains('\n'));
+    }
+
+    #[test]
+    fn save_files_reject_different_game_ids() {
+        let first_game_file =
+            std::env::temp_dir().join(format!("moonroom-save-first-{}.lua", process::id()));
+        let second_game_file =
+            std::env::temp_dir().join(format!("moonroom-save-second-{}.lua", process::id()));
+        let save_file =
+            std::env::temp_dir().join(format!("moonroom-wrong-game-save-{}.json", process::id()));
+
+        fs::write(
+            &first_game_file,
+            SAVE_ID_TEST_GAME.replace("GAME_ID", "first"),
+        )
+        .expect("first game should write");
+        fs::write(
+            &second_game_file,
+            SAVE_ID_TEST_GAME.replace("GAME_ID", "second"),
+        )
+        .expect("second game should write");
+
+        let game = LuaGame::load(&first_game_file).expect("first game loads");
+        game.save_to_path(&save_file).expect("save succeeds");
+
+        let mut other_game = LuaGame::load(&second_game_file).expect("second game loads");
+        let err = other_game
+            .load_from_path(&save_file)
+            .expect_err("wrong game save should fail");
+
+        assert!(err.to_string().contains("belongs to game 'first'"));
     }
 
     #[test]

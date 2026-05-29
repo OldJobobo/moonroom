@@ -6,6 +6,10 @@ pub struct GameMetadata {
     pub title: String,
     pub author: Option<String>,
     pub start: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +122,10 @@ pub struct World {
 pub struct GameState {
     pub current_room: String,
     #[serde(default)]
+    pub current_scene: Option<String>,
+    #[serde(default)]
+    pub current_chapter: Option<String>,
+    #[serde(default)]
     pub visited_rooms: BTreeSet<String>,
     pub inventory: BTreeSet<String>,
     pub worn: BTreeSet<String>,
@@ -144,6 +152,8 @@ pub struct GameState {
 pub struct ScheduledEvent {
     pub name: String,
     pub due_turn: u64,
+    #[serde(default)]
+    pub scene: Option<String>,
 }
 
 impl GameState {
@@ -158,6 +168,8 @@ impl GameState {
 
         Self {
             current_room: start_room.clone(),
+            current_scene: None,
+            current_chapter: None,
             visited_rooms: BTreeSet::from([start_room]),
             inventory: BTreeSet::new(),
             worn: BTreeSet::new(),
@@ -221,6 +233,22 @@ impl World {
             Some(metadata) => {
                 if !self.rooms.contains_key(&metadata.start) {
                     report.error(format!("start room '{}' does not exist", metadata.start));
+                }
+
+                if metadata
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.trim().is_empty())
+                {
+                    report.error("game id cannot be empty");
+                }
+
+                if metadata
+                    .version
+                    .as_deref()
+                    .is_some_and(|version| version.trim().is_empty())
+                {
+                    report.error("game version cannot be empty");
                 }
             }
             None => report.error("game metadata has not been defined"),
@@ -675,6 +703,12 @@ impl Game {
                     "scheduled event name cannot be empty".to_string(),
                 ));
             }
+
+            if timer.scene.as_deref().is_some_and(str::is_empty) {
+                return Err(GameError::InvalidState(
+                    "scheduled event scene cannot be empty".to_string(),
+                ));
+            }
         }
 
         Ok(())
@@ -686,6 +720,42 @@ impl Game {
 
     pub fn current_room_id(&self) -> &str {
         &self.state.current_room
+    }
+
+    pub fn current_scene(&self) -> Option<&str> {
+        self.state.current_scene.as_deref()
+    }
+
+    pub fn current_chapter(&self) -> Option<&str> {
+        self.state.current_chapter.as_deref()
+    }
+
+    pub fn start_scene(&mut self, name: impl Into<String>) {
+        if let Some(current_scene) = &self.state.current_scene {
+            self.state
+                .timers
+                .retain(|timer| timer.scene.as_ref() != Some(current_scene));
+        }
+
+        self.state.current_scene = Some(name.into());
+    }
+
+    pub fn end_scene(&mut self, name: Option<&str>) -> Option<String> {
+        let current_scene = self.state.current_scene.as_deref()?;
+
+        if name.is_some_and(|name| name != current_scene) {
+            return None;
+        }
+
+        let ended = self.state.current_scene.take()?;
+        self.state
+            .timers
+            .retain(|timer| timer.scene.as_ref() != Some(&ended));
+        Some(ended)
+    }
+
+    pub fn set_chapter(&mut self, name: impl Into<String>) {
+        self.state.current_chapter = Some(name.into());
     }
 
     pub fn flag(&mut self, name: impl Into<String>) {
@@ -813,6 +883,23 @@ impl Game {
         self.state.timers.push(ScheduledEvent {
             name,
             due_turn: self.state.turn.saturating_add(turns),
+            scene: None,
+        });
+    }
+
+    pub fn schedule_scene_event(
+        &mut self,
+        turns: u64,
+        name: impl Into<String>,
+        scene: impl Into<String>,
+    ) {
+        let name = name.into();
+        let scene = scene.into();
+        self.cancel_event(&name);
+        self.state.timers.push(ScheduledEvent {
+            name,
+            due_turn: self.state.turn.saturating_add(turns),
+            scene: Some(scene),
         });
     }
 
@@ -822,6 +909,11 @@ impl Game {
 
     pub fn set_random_state(&mut self, random_state: u64) {
         self.state.random_state = random_state;
+    }
+
+    pub fn set_random_seed(&mut self, random_seed: u64) {
+        self.state.random_seed = random_seed;
+        self.state.random_state = random_seed;
     }
 
     pub fn handle_command(&mut self, input: &str) -> Result<CommandResult, GameError> {
@@ -1668,9 +1760,15 @@ impl Game {
 
         for timer in self.state.timers.drain(..) {
             if timer.due_turn <= self.state.turn {
-                due.push(GameEvent::Timer {
-                    event_name: timer.name,
-                });
+                if timer
+                    .scene
+                    .as_ref()
+                    .is_none_or(|scene| self.state.current_scene.as_ref() == Some(scene))
+                {
+                    due.push(GameEvent::Timer {
+                        event_name: timer.name,
+                    });
+                }
             } else {
                 pending.push(timer);
             }
@@ -2654,6 +2752,43 @@ mod tests {
     }
 
     #[test]
+    fn tracks_scenes_chapters_and_scene_scoped_timers() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        assert_eq!(game.current_scene(), None);
+        assert_eq!(game.current_chapter(), None);
+
+        game.set_chapter("arrival");
+        game.start_scene("foyer_puzzle");
+        game.schedule_scene_event(2, "scene_bell", "foyer_puzzle");
+        assert_eq!(game.current_scene(), Some("foyer_puzzle"));
+        assert_eq!(game.current_chapter(), Some("arrival"));
+
+        game.handle_command("take key").expect("turn one");
+        let CommandResult::Continue(outcome) = game.handle_command("drop key").expect("turn two")
+        else {
+            panic!("drop should continue");
+        };
+        assert!(outcome.events.contains(&GameEvent::Timer {
+            event_name: "scene_bell".to_string()
+        }));
+
+        game.schedule_scene_event(1, "cancelled_bell", "foyer_puzzle");
+        assert_eq!(
+            game.end_scene(Some("foyer_puzzle")),
+            Some("foyer_puzzle".to_string())
+        );
+        assert_eq!(game.current_scene(), None);
+        let CommandResult::Continue(outcome) = game.handle_command("take key").expect("turn three")
+        else {
+            panic!("take should continue");
+        };
+        assert!(!outcome.events.contains(&GameEvent::Timer {
+            event_name: "cancelled_bell".to_string()
+        }));
+    }
+
+    #[test]
     fn random_state_advances_deterministically() {
         let state = GameState::DEFAULT_RANDOM_SEED;
         let first = random_bounded(state, 10);
@@ -2855,6 +2990,8 @@ mod tests {
                 title: "Test".to_string(),
                 author: None,
                 start: "foyer".to_string(),
+                id: Some("test".to_string()),
+                version: Some("1.0.0".to_string()),
             }),
             settings: GameSettings::default(),
             rooms: BTreeMap::from([

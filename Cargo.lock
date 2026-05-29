@@ -337,6 +337,7 @@ version = "0.1.0"
 dependencies = [
  "mlua",
  "mr-core",
+ "serde",
  "serde_json",
  "thiserror",
 ]

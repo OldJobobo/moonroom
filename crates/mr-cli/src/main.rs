@@ -1,13 +1,18 @@
 use std::{
-    fs,
-    io::{self, IsTerminal, Write},
+    env, fs,
+    io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
 use clap::{Parser, Subcommand};
-use mr_core::{CommandResult, WorldValidationReport};
-use mr_lua::{LuaGame, load_game};
+use mr_core::{CommandResult, ThingKind, WorldValidationReport};
+use mr_lua::{
+    GameSource, LuaGame, SaveOutputMode, load_game_source, pack_game_directory,
+    pack_game_directory_to_bytes, unpack_game_package,
+};
 use rustyline::{DefaultEditor, error::ReadlineError};
+
+const EMBED_MARKER: &[u8] = b"MOONROOM_EMBEDDED_MOON_V1";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -23,16 +28,60 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Play {
-        #[arg(value_name = "GAME_DIR")]
+        #[arg(value_name = "GAME")]
         game_dir: PathBuf,
     },
     Test {
-        #[arg(value_name = "GAME_DIR")]
+        #[arg(value_name = "GAME")]
         game_dir: PathBuf,
+
+        #[arg(short, long, value_name = "TEXT")]
+        filter: Option<String>,
+
+        #[arg(long)]
+        update: bool,
+
+        #[arg(long, value_name = "SEED")]
+        seed: Option<u64>,
     },
     Check {
+        #[arg(value_name = "GAME")]
+        game_dir: PathBuf,
+    },
+    Inspect {
+        #[arg(value_name = "GAME")]
+        game_dir: PathBuf,
+    },
+    Transcript {
         #[arg(value_name = "GAME_DIR")]
         game_dir: PathBuf,
+
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    Pack {
+        #[arg(value_name = "GAME_DIR")]
+        game_dir: PathBuf,
+
+        #[arg(short, long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    Unpack {
+        #[arg(value_name = "PACKAGE")]
+        package: PathBuf,
+
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+    },
+    Build {
+        #[arg(value_name = "GAME_DIR")]
+        game_dir: PathBuf,
+
+        #[arg(long)]
+        standalone: bool,
+
+        #[arg(short, long, value_name = "PATH")]
+        output: PathBuf,
     },
     New {
         #[arg(value_name = "NAME")]
@@ -41,24 +90,47 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
+    if env::args_os().len() == 1
+        && let Some(package) = read_embedded_package()?
+    {
+        let package: &'static [u8] = Box::leak(package.into_boxed_slice());
+        let mut game = LuaGame::load_source(GameSource::Embedded(package))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        play(&mut game)?;
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
         Command::Play { game_dir } => {
-            let game_file = game_dir.join("game.lua");
-            let mut game = LuaGame::load(&game_file).map_err(|err| anyhow::anyhow!("{err}"))?;
+            let mut game = LuaGame::load_source(GameSource::from_path(&game_dir))
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
             play(&mut game)?;
         }
-        Command::Test { game_dir } => {
-            let report = mr_test::run_game_tests(&game_dir)?;
+        Command::Test {
+            game_dir,
+            filter,
+            update,
+            seed,
+        } => {
+            let report = mr_test::run_game_tests_with_options(
+                &game_dir,
+                &mr_test::TranscriptTestOptions {
+                    filter,
+                    update,
+                    seed,
+                },
+            )?;
 
             if report.is_success() {
                 println!("{} transcript(s) passed.", report.passed);
             } else {
                 for failure in &report.failed {
                     eprintln!(
-                        "{} failed on command '{}'",
+                        "{}:{} failed on command '{}'",
                         failure.transcript.display(),
+                        failure.step,
                         failure.command
                     );
                     eprintln!("expected:\n{}\n", failure.expected);
@@ -83,6 +155,43 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::Inspect { game_dir } => {
+            let game = LuaGame::load_source(GameSource::from_path(&game_dir))
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
+            print_inspection(&game);
+        }
+        Command::Transcript { game_dir, output } => {
+            let game_file = game_dir.join("game.lua");
+            let mut game = LuaGame::load(&game_file).map_err(|err| anyhow::anyhow!("{err}"))?;
+            let output =
+                output.unwrap_or_else(|| game_dir.join("tests").join("recorded.transcript"));
+            record_transcript(&mut game, &output)?;
+            println!("Recorded transcript to {}.", output.display());
+        }
+        Command::Pack { game_dir, output } => {
+            pack_game_directory(&game_dir, &output).map_err(|err| anyhow::anyhow!("{err}"))?;
+            println!("Packed {} to {}.", game_dir.display(), output.display());
+        }
+        Command::Unpack { package, output } => {
+            unpack_game_package(&package, &output).map_err(|err| anyhow::anyhow!("{err}"))?;
+            println!("Unpacked {} to {}.", package.display(), output.display());
+        }
+        Command::Build {
+            game_dir,
+            standalone,
+            output,
+        } => {
+            if !standalone {
+                anyhow::bail!("only --standalone builds are supported");
+            }
+
+            build_standalone(&game_dir, &output)?;
+            println!(
+                "Built standalone game from {} at {}.",
+                game_dir.display(),
+                output.display()
+            );
+        }
         Command::New { name } => {
             let path = PathBuf::from(name);
             create_project(&path)?;
@@ -98,10 +207,69 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn check_project(game_dir: &Path) -> anyhow::Result<WorldValidationReport> {
-    let game_file = game_dir.join("game.lua");
-    let world = load_game(&game_file).map_err(|err| anyhow::anyhow!("{err}"))?;
+    let world = load_game_source(GameSource::from_path(game_dir))
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
 
     Ok(world.validate())
+}
+
+fn read_embedded_package() -> anyhow::Result<Option<Vec<u8>>> {
+    let exe = env::current_exe()?;
+    let bytes = fs::read(exe)?;
+
+    if bytes.len() < 8 + EMBED_MARKER.len() {
+        return Ok(None);
+    }
+
+    let mut len_bytes = [0_u8; 8];
+    len_bytes.copy_from_slice(&bytes[bytes.len() - 8..]);
+    let package_len = u64::from_le_bytes(len_bytes) as usize;
+    let Some(marker_start) = bytes
+        .len()
+        .checked_sub(8)
+        .and_then(|end| end.checked_sub(EMBED_MARKER.len()))
+        .and_then(|end| end.checked_sub(package_len))
+    else {
+        return Ok(None);
+    };
+    let marker_range = marker_start + package_len..marker_start + package_len + EMBED_MARKER.len();
+
+    if bytes.get(marker_range) != Some(EMBED_MARKER) {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        bytes[marker_start..marker_start + package_len].to_vec(),
+    ))
+}
+
+fn build_standalone(game_dir: &Path, output: &Path) -> anyhow::Result<()> {
+    let package = pack_game_directory_to_bytes(game_dir).map_err(|err| anyhow::anyhow!("{err}"))?;
+    let current_exe = env::current_exe()?;
+    let mut executable = fs::read(&current_exe)?;
+
+    executable.extend_from_slice(&package);
+    executable.extend_from_slice(EMBED_MARKER);
+    executable.extend_from_slice(&(package.len() as u64).to_le_bytes());
+
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(output, executable)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(output)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(output, permissions)?;
+    }
+
+    Ok(())
 }
 
 fn print_check_report(game_dir: &Path, report: &WorldValidationReport) {
@@ -124,6 +292,154 @@ fn print_check_report(game_dir: &Path, report: &WorldValidationReport) {
             game_dir.display(),
             report.warnings().count()
         );
+    }
+}
+
+fn print_inspection(game: &LuaGame) {
+    let world = game.world();
+    let callbacks = game.callback_summary();
+
+    if let Some(metadata) = &world.metadata {
+        println!("{}", metadata.title);
+        if let Some(author) = &metadata.author {
+            println!("by {author}");
+        }
+        if let Some(id) = &metadata.id {
+            println!("id: {id}");
+        }
+        if let Some(version) = &metadata.version {
+            println!("version: {version}");
+        }
+        println!("start: {}", metadata.start);
+    } else {
+        println!("Untitled Moonroom game");
+    }
+
+    println!();
+    println!("Rooms ({})", world.rooms.len());
+    for room in world.rooms.values() {
+        let exits = if room.exits.is_empty() {
+            "none".to_string()
+        } else {
+            room.exits.keys().cloned().collect::<Vec<_>>().join(", ")
+        };
+        let room_callbacks = callbacks
+            .rooms
+            .get(&room.id)
+            .map(|names| names.join(", "))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "- {}: {} [exits: {exits}; callbacks: {room_callbacks}]",
+            room.id, room.name
+        );
+    }
+
+    println!();
+    println!("Things ({})", world.things.len());
+    for thing in world.things.values() {
+        let traits = thing_traits(thing);
+        let thing_callbacks = callbacks
+            .things
+            .get(&thing.id)
+            .map(|names| names.join(", "))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "- {}: {} @ {} [{}; callbacks: {}]",
+            thing.id,
+            thing.name,
+            thing.location,
+            traits.join(", "),
+            thing_callbacks
+        );
+    }
+
+    println!();
+    println!("Verbs ({})", world.verbs.len());
+    for verb in world.verbs.values() {
+        println!("- {} [aliases: {}]", verb.id, display_list(&verb.aliases));
+    }
+
+    println!();
+    println!("Actors");
+    for (actor_id, topics) in &world.actor_topics {
+        let ask = callbacks
+            .ask_topics
+            .get(actor_id)
+            .map(|topics| topics.join(", "))
+            .unwrap_or_else(|| "none".to_string());
+        let tell = callbacks
+            .tell_topics
+            .get(actor_id)
+            .map(|topics| topics.join(", "))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "- {actor_id} topics: {} [ask: {ask}; tell: {tell}]",
+            topics.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    println!();
+    println!("Events ({})", callbacks.events.len());
+    for event in callbacks.events {
+        println!("- {event}");
+    }
+
+    println!();
+    println!(
+        "Global callbacks: {}",
+        display_static_list(&callbacks.global)
+    );
+}
+
+fn thing_traits(thing: &mr_core::Thing) -> Vec<&'static str> {
+    let mut traits = Vec::new();
+
+    match thing.kind {
+        ThingKind::Object => traits.push("object"),
+        ThingKind::Container => traits.push("container"),
+        ThingKind::Supporter => traits.push("supporter"),
+    }
+
+    if thing.portable {
+        traits.push("portable");
+    }
+
+    if thing.wearable {
+        traits.push("wearable");
+    }
+
+    if thing.actor {
+        traits.push("actor");
+    }
+
+    if thing.hidden {
+        traits.push("hidden");
+    }
+
+    if thing.openable {
+        traits.push("openable");
+    }
+
+    if thing.lockable {
+        traits.push("lockable");
+    }
+
+    traits
+}
+
+fn display_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
+fn display_static_list(items: &[&str]) -> String {
+    if items.is_empty() {
+        "none".to_string()
+    } else {
+        items.join(", ")
     }
 }
 
@@ -171,8 +487,16 @@ fn project_title(path: &Path) -> String {
 }
 
 fn template_game(title: &str) -> String {
+    let id = title
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+
     format!(
         r#"game {{
+  id = "{id}",
+  version = "0.1.0",
   title = "{title}",
   author = "Anonymous",
   start = "start"
@@ -374,6 +698,123 @@ const TEMPLATE_LUARC: &str = r#"{
 }
 "#;
 
+fn record_transcript(game: &mut LuaGame, output: &Path) -> anyhow::Result<()> {
+    if output.exists() {
+        anyhow::bail!("{} already exists", output.display());
+    }
+
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    println!(
+        "{}",
+        game.opening().map_err(|err| anyhow::anyhow!("{err}"))?
+    );
+
+    let mut transcript = String::new();
+
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        record_transcript_interactive(game, &mut transcript)?;
+    } else {
+        record_transcript_plain_stdin(game, &mut transcript)?;
+    }
+
+    fs::write(output, transcript)?;
+    Ok(())
+}
+
+fn record_transcript_interactive(
+    game: &mut LuaGame,
+    transcript: &mut String,
+) -> anyhow::Result<()> {
+    let mut editor = DefaultEditor::new()?;
+
+    loop {
+        match editor.readline("\n> ") {
+            Ok(input) => {
+                if !input.trim().is_empty() {
+                    editor.add_history_entry(input.as_str())?;
+                }
+
+                if record_transcript_input(&input, game, transcript)? == ReplAction::Quit {
+                    break;
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("^C");
+            }
+            Err(ReadlineError::Eof) => {
+                println!();
+                break;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Ok(())
+}
+
+fn record_transcript_plain_stdin(
+    game: &mut LuaGame,
+    transcript: &mut String,
+) -> anyhow::Result<()> {
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {
+        let input = line?;
+        if record_transcript_input(&input, game, transcript)? == ReplAction::Quit {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn record_transcript_input(
+    input: &str,
+    game: &mut LuaGame,
+    transcript: &mut String,
+) -> anyhow::Result<ReplAction> {
+    let input = input.trim();
+
+    if input.is_empty() {
+        return Ok(ReplAction::Continue);
+    }
+
+    let result = game
+        .handle_command(input)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let (output, action) = match result {
+        CommandResult::Continue(outcome) => (outcome.output, ReplAction::Continue),
+        CommandResult::Quit(output) => (output, ReplAction::Quit),
+    };
+
+    if !output.is_empty() {
+        println!("{output}");
+    }
+
+    append_transcript_block(transcript, input, &output);
+    Ok(action)
+}
+
+fn append_transcript_block(transcript: &mut String, command: &str, output: &str) {
+    if !transcript.is_empty() {
+        transcript.push('\n');
+    }
+
+    transcript.push_str("> ");
+    transcript.push_str(command);
+    transcript.push('\n');
+
+    if !output.is_empty() {
+        transcript.push_str(output.trim_end());
+        transcript.push('\n');
+    }
+}
+
 fn play(game: &mut LuaGame) -> anyhow::Result<()> {
     println!(
         "{}",
@@ -475,8 +916,8 @@ fn handle_cli_command(input: &str, game: &mut LuaGame) -> anyhow::Result<bool> {
 
     match command {
         "save" => {
-            let path = words.next().unwrap_or("save.json");
-            game.save_to_path(path)
+            let (mode, path) = parse_save_command(words.collect::<Vec<_>>())?;
+            game.save_to_path_with_mode(&path, mode)
                 .map_err(|err| anyhow::anyhow!("{err}"))?;
             println!("Saved to {path}.");
             Ok(true)
@@ -497,6 +938,22 @@ fn handle_cli_command(input: &str, game: &mut LuaGame) -> anyhow::Result<bool> {
     }
 }
 
+fn parse_save_command(args: Vec<&str>) -> anyhow::Result<(SaveOutputMode, String)> {
+    let mut mode = SaveOutputMode::Pretty;
+    let mut path = None::<String>;
+
+    for arg in args {
+        match arg {
+            "--pretty" => mode = SaveOutputMode::Pretty,
+            "--compact" | "-c" => mode = SaveOutputMode::Compact,
+            path_arg if path.is_none() => path = Some(path_arg.to_string()),
+            extra => anyhow::bail!("unexpected save argument '{extra}'"),
+        }
+    }
+
+    Ok((mode, path.unwrap_or_else(|| "save.json".to_string())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +972,38 @@ mod tests {
         assert_eq!(report.passed, 1);
 
         fs::remove_dir_all(project_dir).expect("temporary project should be removed");
+    }
+
+    #[test]
+    fn transcript_recording_writes_command_blocks() {
+        let project_dir = unique_temp_dir("moonroom-record");
+        create_project(&project_dir).expect("template should be created");
+        let mut game = LuaGame::load(project_dir.join("game.lua")).expect("template should load");
+        let mut transcript = String::new();
+
+        let action = record_transcript_input("take coin", &mut game, &mut transcript)
+            .expect("record should run command");
+
+        assert_eq!(action, ReplAction::Continue);
+        assert_eq!(
+            transcript,
+            "> take coin\nThe coin vanishes into your palm.\n"
+        );
+
+        fs::remove_dir_all(project_dir).expect("temporary project should be removed");
+    }
+
+    #[test]
+    fn save_command_accepts_output_modes() {
+        assert_eq!(
+            parse_save_command(vec!["--compact", "slot.json"]).expect("save args parse"),
+            (SaveOutputMode::Compact, "slot.json".to_string())
+        );
+        assert_eq!(
+            parse_save_command(vec!["--pretty"]).expect("save args parse"),
+            (SaveOutputMode::Pretty, "save.json".to_string())
+        );
+        assert!(parse_save_command(vec!["one.json", "two.json"]).is_err());
     }
 
     #[test]

@@ -137,6 +137,14 @@ thing "garden_shears" {
     else
       game.say("The shears open and close with a clean, dry click.")
     end
+  end,
+
+  on_use_with = function(game, item_id, target_id)
+    if target_id == "cracked_pane" then
+      game.say("You work the shears into the crack, but the glass has already shown you all it can.")
+    else
+      game.say("The shears are too clean and too particular for that.")
+    end
   end
 }
 

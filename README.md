@@ -9,7 +9,7 @@ Moonroom is early, but already playable.
 ## Features
 
 - Lua DSL for rooms, things, exits, verbs, actors, topics, scenes, chapters, and timed events.
-- Classic parser commands: `look`, `go north`, `take key`, `open box`, `unlock chest with key`, `read note`, `tell caretaker about key`, `show key to caretaker`, `again`, `undo`, and more.
+- Classic parser commands: `look`, `look north`, `look at key`, `go north`, `go n`, `take all`, `x it`, `open box`, `unlock chest with key`, `use key on door`, `read note`, `tell caretaker about key`, `show key to caretaker`, `again`, `undo`, and more.
 - Containers, supporters, wearables, hidden/revealed things, openable and lockable things, guarded exits, NPC talk, topic aliases, and Rust-owned actor memory.
 - Versioned, game-checked JSON save/load, including scenes, chapters, timers, and actor memory.
 - Static project validation with `moonroom check`.

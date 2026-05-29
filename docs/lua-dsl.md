@@ -316,17 +316,32 @@ topics = {
 Supported interactions include:
 
 ```text
+look north
+look exits
+look at key
 look in box
 look on table
+go n
 put key in box
 put key on table
 take key from box
+take all
+drop all
 open box
 close box
 unlock chest with key
 lock chest
 read note
 use key
+use key on door
+x it
+enter hall
+go through door
+listen
+smell
+search
+touch key
+wait
 wear coat
 remove coat
 talk to caretaker
@@ -340,11 +355,16 @@ undo
 
 `again` or `g` repeats the last advancing command. `undo` restores the Rust-owned game state from before the last advancing command, including state changed by Lua callbacks. The undo history is bounded and is not written into save files.
 
+After object-focused commands such as `take key`, the parser can resolve `it` or `them` to the most recently referenced thing.
+
+Lua authors can define `on_use_with = function(game, item_id, target_id) ... end` on the item to handle `use item on target` or `use item with target`.
+
 Supported thing callbacks:
 
 ```lua
 on_take = function(game) ... end
 on_drop = function(game) ... end
+on_use_with = function(game, item_id, target_id) ... end
 on_read = function(game) ... end
 on_open = function(game) ... end
 on_close = function(game) ... end

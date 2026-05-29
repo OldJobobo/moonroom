@@ -493,6 +493,7 @@ pub struct Game {
     state: GameState,
     undo_stack: Vec<GameState>,
     last_command: Option<String>,
+    last_referenced_thing: Option<String>,
 }
 
 impl Game {
@@ -505,6 +506,7 @@ impl Game {
             state,
             undo_stack: Vec::new(),
             last_command: None,
+            last_referenced_thing: None,
         })
     }
 
@@ -517,6 +519,7 @@ impl Game {
         self.validate_state(&state)?;
         self.state = state;
         self.clear_history();
+        self.last_referenced_thing = None;
         Ok(())
     }
 
@@ -538,6 +541,7 @@ impl Game {
     pub fn clear_history(&mut self) {
         self.undo_stack.clear();
         self.last_command = None;
+        self.last_referenced_thing = None;
     }
 
     fn push_undo_state(&mut self, state: GameState) {
@@ -959,7 +963,7 @@ impl Game {
                     room_id: self.state.current_room.clone(),
                 }],
             },
-            "look" | "l" => CommandOutcome::new(self.look_inside(&rest)),
+            "look" | "l" => CommandOutcome::new(self.look_target(&rest)?),
             "inventory" | "inv" | "i" => CommandOutcome::new(self.inventory()),
             "examine" | "x" => CommandOutcome::new(self.examine(&rest)),
             "take" | "get" => self.take(&rest),
@@ -978,7 +982,7 @@ impl Game {
             "tell" => self.tell(&rest),
             "show" => self.show(&rest),
             "give" => self.give(&rest),
-            "go" => self.go(&rest)?,
+            "go" => self.go_or_enter(&rest)?,
             "north" | "n" => self.go("north")?,
             "south" | "s" => self.go("south")?,
             "east" | "e" => self.go("east")?,
@@ -986,16 +990,7 @@ impl Game {
             "up" | "u" => self.go("up")?,
             "down" | "d" => self.go("down")?,
             "quit" | "exit" => return Ok(CommandResult::Quit("Goodbye.".to_string())),
-            _ => self
-                .find_custom_verb(verb)
-                .map(|verb_id| CommandOutcome {
-                    output: String::new(),
-                    events: vec![GameEvent::CustomVerb {
-                        verb_id,
-                        input: rest.clone(),
-                    }],
-                })
-                .unwrap_or_else(|| CommandOutcome::new("I don't understand that.")),
+            _ => self.fallback_command(verb, &rest)?,
         };
 
         let advances_turn = command_advances_turn(verb);
@@ -1007,6 +1002,8 @@ impl Game {
             self.state.turn += 1;
             outcome.events.extend(self.due_timer_events());
         }
+
+        self.remember_referenced_things(&outcome.events);
 
         Ok(CommandResult::Continue(outcome))
     }
@@ -1107,6 +1104,10 @@ impl Game {
             return CommandOutcome::new("Take what?");
         }
 
+        if query == "all" {
+            return self.take_all();
+        }
+
         let (query, source) = split_from_target(query);
 
         let source_id = if let Some(source) = source {
@@ -1162,6 +1163,49 @@ impl Game {
         CommandOutcome {
             output: format!("You take the {}.", thing_name),
             events: vec![GameEvent::Take { thing_id: id }],
+        }
+    }
+
+    fn take_all(&mut self) -> CommandOutcome {
+        let ids = self
+            .world
+            .things
+            .iter()
+            .filter(|(id, thing)| {
+                thing.portable
+                    && !self.state.inventory.contains(*id)
+                    && self.visible(id)
+                    && self.thing_is_reachable(id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+
+        if ids.is_empty() {
+            return CommandOutcome::new("There is nothing to take.");
+        }
+
+        let mut output = Vec::new();
+        let mut events = Vec::new();
+
+        for id in ids {
+            let thing_name = self
+                .world
+                .things
+                .get(&id)
+                .expect("thing id came from world")
+                .name
+                .clone();
+            self.state.inventory.insert(id.clone());
+            self.state
+                .thing_locations
+                .insert(id.clone(), "inventory".to_string());
+            output.push(format!("You take the {}.", thing_name));
+            events.push(GameEvent::Take { thing_id: id });
+        }
+
+        CommandOutcome {
+            output: output.join("\n"),
+            events,
         }
     }
 
@@ -1240,6 +1284,10 @@ impl Game {
             return CommandOutcome::new("Drop what?");
         }
 
+        if query == "all" {
+            return self.drop_all();
+        }
+
         let Some(id) = self.find_inventory_thing_id(query) else {
             return CommandOutcome::new("You aren't carrying that.");
         };
@@ -1266,9 +1314,66 @@ impl Game {
         }
     }
 
+    fn drop_all(&mut self) -> CommandOutcome {
+        let ids = self
+            .state
+            .inventory
+            .iter()
+            .filter(|id| !self.state.worn.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if ids.is_empty() {
+            return CommandOutcome::new("You have nothing to drop.");
+        }
+
+        let mut output = Vec::new();
+        let mut events = Vec::new();
+
+        for id in ids {
+            let thing_name = self
+                .world
+                .things
+                .get(&id)
+                .expect("thing id came from inventory")
+                .name
+                .clone();
+            self.state.inventory.remove(&id);
+            self.state
+                .thing_locations
+                .insert(id.clone(), self.state.current_room.clone());
+            output.push(format!("You drop the {}.", thing_name));
+            events.push(GameEvent::Drop { thing_id: id });
+        }
+
+        CommandOutcome {
+            output: output.join("\n"),
+            events,
+        }
+    }
+
     fn use_thing(&mut self, query: &str) -> CommandOutcome {
         if query.is_empty() {
             return CommandOutcome::new("Use what?");
+        }
+
+        if let Some((item_query, target_query)) = split_use_target(query) {
+            let Some(item_id) = self.find_accessible_thing_id(item_query) else {
+                return CommandOutcome::new("You don't see that here.");
+            };
+
+            let Some(target_id) = self.find_accessible_thing_id(target_query) else {
+                return CommandOutcome::new("You don't see that here.");
+            };
+
+            if item_id == target_id {
+                return CommandOutcome::new("You can't use something on itself.");
+            }
+
+            return CommandOutcome {
+                output: "Nothing happens.".to_string(),
+                events: vec![GameEvent::UseWith { item_id, target_id }],
+            };
         }
 
         let Some(id) = self.find_accessible_thing_id(query) else {
@@ -1651,7 +1756,19 @@ impl Game {
         }
     }
 
+    fn go_or_enter(&mut self, query: &str) -> Result<CommandOutcome, GameError> {
+        if let Some(target) = query.strip_prefix("through ").map(str::trim)
+            && !target.is_empty()
+        {
+            return self.enter(target);
+        }
+
+        self.go(query)
+    }
+
     fn go(&mut self, direction: &str) -> Result<CommandOutcome, GameError> {
+        let direction = normalize_direction(direction).unwrap_or(direction);
+
         if direction.is_empty() {
             return Ok(CommandOutcome::new("Go where?"));
         }
@@ -1685,6 +1802,44 @@ impl Game {
                 room_id: self.state.current_room.clone(),
             }],
         })
+    }
+
+    fn enter(&mut self, query: &str) -> Result<CommandOutcome, GameError> {
+        if query.is_empty() {
+            return Ok(CommandOutcome::new("Enter what?"));
+        }
+
+        if let Some(direction) = normalize_direction(query) {
+            return self.go(direction);
+        }
+
+        let room = self.current_room()?;
+        let matching_exits = room
+            .exits
+            .iter()
+            .filter_map(|(direction, exit)| {
+                self.world
+                    .rooms
+                    .get(&exit.to)
+                    .filter(|target| {
+                        normalize_noun_phrase(&target.id) == normalize_noun_phrase(query)
+                            || normalize_noun_phrase(&target.name) == normalize_noun_phrase(query)
+                    })
+                    .map(|_| direction.clone())
+            })
+            .collect::<Vec<_>>();
+
+        match matching_exits.as_slice() {
+            [direction] => self.go(direction),
+            [] => {
+                if self.find_accessible_thing_id(query).is_some() {
+                    Ok(self.use_thing(query))
+                } else {
+                    Ok(CommandOutcome::new("You can't enter that."))
+                }
+            }
+            _ => Ok(CommandOutcome::new("Which way do you mean?")),
+        }
     }
 
     fn check_lock_key(
@@ -1800,6 +1955,12 @@ impl Game {
     }
 
     fn find_accessible_thing_id(&self, query: &str) -> Option<String> {
+        if let Some(id) = self.resolve_pronoun_thing_id(query)
+            && (self.thing_is_reachable(&id) || self.state.inventory.contains(&id))
+        {
+            return Some(id);
+        }
+
         self.find_reachable_thing_id(query).or_else(|| {
             self.state
                 .inventory
@@ -1816,6 +1977,12 @@ impl Game {
     }
 
     fn find_reachable_thing_id(&self, query: &str) -> Option<String> {
+        if let Some(id) = self.resolve_pronoun_thing_id(query)
+            && self.thing_is_reachable(&id)
+        {
+            return Some(id);
+        }
+
         self.world
             .things
             .iter()
@@ -1826,6 +1993,12 @@ impl Game {
     }
 
     fn find_inventory_thing_id(&self, query: &str) -> Option<String> {
+        if let Some(id) = self.resolve_pronoun_thing_id(query)
+            && self.state.inventory.contains(&id)
+        {
+            return Some(id);
+        }
+
         self.state
             .inventory
             .iter()
@@ -1837,6 +2010,42 @@ impl Game {
                     .is_some_and(|thing| thing.matches(query))
             })
             .cloned()
+    }
+
+    fn resolve_pronoun_thing_id(&self, query: &str) -> Option<String> {
+        matches!(normalize_noun_phrase(query).as_str(), "it" | "them")
+            .then(|| self.last_referenced_thing.clone())
+            .flatten()
+            .filter(|id| self.world.things.contains_key(id) && self.visible(id))
+    }
+
+    fn remember_referenced_things(&mut self, events: &[GameEvent]) {
+        for event in events {
+            let thing_id = match event {
+                GameEvent::Take { thing_id }
+                | GameEvent::Drop { thing_id }
+                | GameEvent::Use { thing_id }
+                | GameEvent::Read { thing_id }
+                | GameEvent::Open { thing_id }
+                | GameEvent::Close { thing_id }
+                | GameEvent::Lock { thing_id }
+                | GameEvent::Unlock { thing_id }
+                | GameEvent::Talk { thing_id }
+                | GameEvent::Ask { thing_id, .. }
+                | GameEvent::Tell { thing_id, .. }
+                | GameEvent::Show { thing_id, .. }
+                | GameEvent::Give { thing_id, .. } => Some(thing_id),
+                GameEvent::UseWith { item_id, .. } => Some(item_id),
+                GameEvent::Look { .. }
+                | GameEvent::EnterRoom { .. }
+                | GameEvent::CustomVerb { .. }
+                | GameEvent::Timer { .. } => None,
+            };
+
+            if let Some(thing_id) = thing_id {
+                self.last_referenced_thing = Some(thing_id.clone());
+            }
+        }
     }
 
     fn find_actor(&self, query: &str) -> Option<(String, &Thing)> {
@@ -1925,6 +2134,55 @@ impl Game {
         }
     }
 
+    fn look_target(&self, query: &str) -> Result<String, GameError> {
+        if let Some(target) = query.strip_prefix("at ").map(str::trim)
+            && !target.is_empty()
+        {
+            return Ok(self.examine(target));
+        }
+
+        if matches!(query, "exit" | "exits") {
+            return Ok(self.exit_list(self.current_room()?));
+        }
+
+        if let Some(direction) = normalize_direction(query) {
+            return self.look_exit(direction);
+        }
+
+        Ok(self.look_inside(query))
+    }
+
+    fn look_exit(&self, direction: &str) -> Result<String, GameError> {
+        let room = self.current_room()?;
+        let Some(exit) = room.exits.get(direction) else {
+            return Ok("You can't see a way in that direction.".to_string());
+        };
+
+        if let Some(required_item) = &exit.requires
+            && !self.has(required_item)
+        {
+            return Ok(exit
+                .locked_msg
+                .clone()
+                .unwrap_or_else(|| "You can't see much that way yet.".to_string()));
+        }
+
+        let target = self
+            .world
+            .rooms
+            .get(&exit.to)
+            .ok_or_else(|| WorldError::MissingRoom(exit.to.clone()))?;
+
+        if target.desc.is_empty() {
+            Ok(format!("To the {} is {}.", direction, target.name))
+        } else {
+            Ok(format!(
+                "To the {} is {}.\n\n{}",
+                direction, target.name, target.desc
+            ))
+        }
+    }
+
     fn contents_of(&self, thing_id: &str) -> Vec<&Thing> {
         self.world
             .things
@@ -1986,6 +2244,41 @@ impl Game {
             .find(|verb| verb.id == query || verb.aliases.iter().any(|alias| alias == query))
             .map(|verb| verb.id.clone())
     }
+
+    fn fallback_command(&mut self, verb: &str, rest: &str) -> Result<CommandOutcome, GameError> {
+        if let Some(verb_id) = self.find_custom_verb(verb) {
+            return Ok(CommandOutcome {
+                output: String::new(),
+                events: vec![GameEvent::CustomVerb {
+                    verb_id,
+                    input: rest.to_string(),
+                }],
+            });
+        }
+
+        match verb {
+            "enter" => self.enter(rest),
+            "wait" | "z" => Ok(CommandOutcome::new("Time passes.")),
+            "listen" => Ok(CommandOutcome::new("You hear nothing unusual.")),
+            "smell" => Ok(CommandOutcome::new("You smell nothing unusual.")),
+            "search" if rest.is_empty() => Ok(CommandOutcome::new("You find nothing new.")),
+            "search" => Ok(CommandOutcome::new(self.examine(rest))),
+            "touch" if rest.is_empty() => Ok(CommandOutcome::new("Touch what?")),
+            "touch" => Ok(CommandOutcome::new(self.touch(rest))),
+            _ => Ok(CommandOutcome::new("I don't understand that.")),
+        }
+    }
+
+    fn touch(&self, query: &str) -> String {
+        let Some(thing) = self.find_accessible_thing(query) else {
+            return "You don't see that here.".to_string();
+        };
+
+        format!(
+            "You touch the {} and notice nothing unexpected.",
+            thing.name
+        )
+    }
 }
 
 impl Thing {
@@ -2029,6 +2322,7 @@ pub enum GameEvent {
     Take { thing_id: String },
     Drop { thing_id: String },
     Use { thing_id: String },
+    UseWith { item_id: String, target_id: String },
     Read { thing_id: String },
     Open { thing_id: String },
     Close { thing_id: String },
@@ -2125,10 +2419,33 @@ fn normalize_command_text(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn normalize_direction(input: &str) -> Option<&'static str> {
+    match input {
+        "north" | "n" => Some("north"),
+        "south" | "s" => Some("south"),
+        "east" | "e" => Some("east"),
+        "west" | "w" => Some("west"),
+        "up" | "u" => Some("up"),
+        "down" | "d" => Some("down"),
+        _ => None,
+    }
+}
+
 fn command_advances_turn(verb: &str) -> bool {
     !matches!(
         verb,
-        "look" | "l" | "inventory" | "inv" | "i" | "quit" | "exit" | "again" | "g" | "undo"
+        "look"
+            | "l"
+            | "examine"
+            | "x"
+            | "inventory"
+            | "inv"
+            | "i"
+            | "quit"
+            | "exit"
+            | "again"
+            | "g"
+            | "undo"
     )
 }
 
@@ -2150,6 +2467,14 @@ fn split_look_target(query: &str) -> Option<(&str, &str)> {
                 .map(|target| ("on", target.trim()))
         })
         .filter(|(_, target)| !target.is_empty())
+}
+
+fn split_use_target(query: &str) -> Option<(&str, &str)> {
+    query
+        .split_once(" on ")
+        .or_else(|| query.split_once(" with "))
+        .map(|(item, target)| (item.trim(), target.trim()))
+        .filter(|(item, target)| !item.is_empty() && !target.is_empty())
 }
 
 fn split_from_target(query: &str) -> (&str, Option<&str>) {
@@ -2264,6 +2589,168 @@ mod tests {
             panic!("drop should continue");
         };
         assert_eq!(outcome.output, "You drop the brass key.");
+    }
+
+    #[test]
+    fn looks_toward_exits_without_moving() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        let CommandResult::Continue(outcome) = game.handle_command("l north").expect("look north")
+        else {
+            panic!("look north should continue");
+        };
+        assert_eq!(outcome.output, "To the north is Hall.\n\nA narrow hall.");
+        assert_eq!(game.current_room_id(), "foyer");
+        assert_eq!(game.state().turn, 0);
+
+        let CommandResult::Continue(outcome) = game.handle_command("look e").expect("look east")
+        else {
+            panic!("look east should continue");
+        };
+        assert_eq!(outcome.output, "The study door is locked.");
+        assert_eq!(game.current_room_id(), "foyer");
+        assert_eq!(game.state().turn, 0);
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("look exits").expect("look exits")
+        else {
+            panic!("look exits should continue");
+        };
+        assert_eq!(outcome.output, "Available exits: east, north.");
+    }
+
+    #[test]
+    fn supports_common_parser_aliases_and_defaults() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        let CommandResult::Continue(outcome) = game.handle_command("look at key").expect("look at")
+        else {
+            panic!("look at should continue");
+        };
+        assert_eq!(outcome.output, "A key.");
+        assert_eq!(game.state().turn, 0);
+
+        let CommandResult::Continue(outcome) = game.handle_command("go n").expect("go n") else {
+            panic!("go n should continue");
+        };
+        assert!(outcome.output.contains("Hall"));
+        assert_eq!(game.current_room_id(), "hall");
+
+        let CommandResult::Continue(outcome) = game.handle_command("listen").expect("listen")
+        else {
+            panic!("listen should continue");
+        };
+        assert_eq!(outcome.output, "You hear nothing unusual.");
+
+        let CommandResult::Continue(outcome) = game.handle_command("smell").expect("smell") else {
+            panic!("smell should continue");
+        };
+        assert_eq!(outcome.output, "You smell nothing unusual.");
+
+        let CommandResult::Continue(outcome) = game.handle_command("search").expect("search")
+        else {
+            panic!("search should continue");
+        };
+        assert_eq!(outcome.output, "You find nothing new.");
+
+        let CommandResult::Continue(outcome) = game.handle_command("wait").expect("wait") else {
+            panic!("wait should continue");
+        };
+        assert_eq!(outcome.output, "Time passes.");
+    }
+
+    #[test]
+    fn enters_directions_and_uses_entered_things() {
+        let mut game = Game::new(test_world()).expect("valid world");
+        game.handle_command("north").expect("move north");
+
+        let CommandResult::Continue(outcome) = game.handle_command("enter south").expect("enter")
+        else {
+            panic!("enter direction should continue");
+        };
+        assert!(outcome.output.contains("Foyer"));
+        assert_eq!(game.current_room_id(), "foyer");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("enter hall")
+            .expect("enter room by exit target")
+        else {
+            panic!("enter room should continue");
+        };
+        assert!(outcome.output.contains("Hall"));
+        assert_eq!(game.current_room_id(), "hall");
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("go through foyer").expect("go through")
+        else {
+            panic!("go through should continue");
+        };
+        assert!(outcome.output.contains("Foyer"));
+        assert_eq!(game.current_room_id(), "foyer");
+    }
+
+    #[test]
+    fn parses_two_object_use_commands() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("use key on table")
+            .expect("use with target")
+        else {
+            panic!("use with target should continue");
+        };
+        assert_eq!(outcome.output, "Nothing happens.");
+        assert_eq!(
+            outcome.events,
+            vec![GameEvent::UseWith {
+                item_id: "brass_key".to_string(),
+                target_id: "table".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn takes_and_drops_all_available_items() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        let CommandResult::Continue(outcome) = game.handle_command("take all").expect("take all")
+        else {
+            panic!("take all should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "You take the brass key.\nYou take the wool cloak."
+        );
+        assert!(game.has("brass_key"));
+        assert!(game.has("wool_cloak"));
+
+        game.handle_command("wear cloak").expect("wear cloak");
+        let CommandResult::Continue(outcome) = game.handle_command("drop all").expect("drop all")
+        else {
+            panic!("drop all should continue");
+        };
+        assert_eq!(outcome.output, "You drop the brass key.");
+        assert!(!game.has("brass_key"));
+        assert!(game.has("wool_cloak"));
+    }
+
+    #[test]
+    fn resolves_recent_object_pronouns() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        game.handle_command("take key").expect("take key");
+        let CommandResult::Continue(outcome) = game.handle_command("x it").expect("examine it")
+        else {
+            panic!("examine it should continue");
+        };
+        assert_eq!(outcome.output, "A key.");
+
+        let CommandResult::Continue(outcome) = game.handle_command("drop it").expect("drop it")
+        else {
+            panic!("drop it should continue");
+        };
+        assert_eq!(outcome.output, "You drop the brass key.");
+        assert!(!game.has("brass_key"));
     }
 
     #[test]

@@ -189,6 +189,7 @@ struct CallbackRegistry {
     on_take: BTreeMap<String, RegistryKey>,
     on_drop: BTreeMap<String, RegistryKey>,
     on_use: BTreeMap<String, RegistryKey>,
+    on_use_with: BTreeMap<String, RegistryKey>,
     on_read: BTreeMap<String, RegistryKey>,
     on_open: BTreeMap<String, RegistryKey>,
     on_close: BTreeMap<String, RegistryKey>,
@@ -637,6 +638,13 @@ impl LuaGame {
                                 outcome.output = output;
                             }
                         }
+                        GameEvent::UseWith { item_id, target_id } => {
+                            if let Some(output) =
+                                self.run_use_with_callback(&item_id, &target_id)?
+                            {
+                                outcome.output = output;
+                            }
+                        }
                         GameEvent::Read { thing_id } => {
                             if let Some(output) =
                                 self.run_thing_callback(&thing_id, ThingCallback::Read)?
@@ -778,6 +786,7 @@ impl LuaGame {
         add_callback_names(&mut things, &self.callbacks.on_take, "on_take");
         add_callback_names(&mut things, &self.callbacks.on_drop, "on_drop");
         add_callback_names(&mut things, &self.callbacks.on_use, "on_use");
+        add_callback_names(&mut things, &self.callbacks.on_use_with, "on_use_with");
         add_callback_names(&mut things, &self.callbacks.on_read, "on_read");
         add_callback_names(&mut things, &self.callbacks.on_open, "on_open");
         add_callback_names(&mut things, &self.callbacks.on_close, "on_close");
@@ -892,6 +901,26 @@ impl LuaGame {
         let (api, session) = self.game_api().map_err(LuaRunError::Lua)?;
         function
             .call::<()>((api, input))
+            .map_err(LuaRunError::Lua)?;
+        self.take_script_output(&session)
+    }
+
+    fn run_use_with_callback(
+        &mut self,
+        item_id: &str,
+        target_id: &str,
+    ) -> Result<Option<String>, LuaRunError> {
+        let Some(callback) = self.callbacks.on_use_with.get(item_id) else {
+            return Ok(None);
+        };
+
+        let function = self
+            .lua
+            .registry_value::<Function>(callback)
+            .map_err(LuaRunError::Lua)?;
+        let (api, session) = self.game_api().map_err(LuaRunError::Lua)?;
+        function
+            .call::<()>((api, item_id, target_id))
             .map_err(LuaRunError::Lua)?;
         self.take_script_output(&session)
     }
@@ -2006,6 +2035,7 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
             let on_take = table.get::<Option<Function>>("on_take")?;
             let on_drop = table.get::<Option<Function>>("on_drop")?;
             let on_use = table.get::<Option<Function>>("on_use")?;
+            let on_use_with = table.get::<Option<Function>>("on_use_with")?;
             let on_read = table.get::<Option<Function>>("on_read")?;
             let on_open = table.get::<Option<Function>>("on_open")?;
             let on_close = table.get::<Option<Function>>("on_close")?;
@@ -2031,6 +2061,11 @@ fn register_dsl(lua: &Lua, state: Rc<RefCell<LoadState>>) -> mlua::Result<()> {
             if let Some(on_use) = on_use {
                 let callback = lua.create_registry_value(on_use)?;
                 state.callbacks.on_use.insert(id.clone(), callback);
+            }
+
+            if let Some(on_use_with) = on_use_with {
+                let callback = lua.create_registry_value(on_use_with)?;
+                state.callbacks.on_use_with.insert(id.clone(), callback);
             }
 
             if let Some(on_read) = on_read {
@@ -2468,7 +2503,18 @@ fn command_advances_turn(input: &str) -> bool {
 
     !matches!(
         verb,
-        "" | "look" | "l" | "inventory" | "inv" | "i" | "quit" | "exit" | "again" | "g" | "undo"
+        "" | "look"
+            | "l"
+            | "examine"
+            | "x"
+            | "inventory"
+            | "inv"
+            | "i"
+            | "quit"
+            | "exit"
+            | "again"
+            | "g"
+            | "undo"
     )
 }
 
@@ -2925,6 +2971,57 @@ thing "chest" {
         assert!(game.game.has_flag("chest_opened"));
         assert!(game.game.has_flag("chest_closed"));
         assert!(game.game.has_flag("chest_locked"));
+    }
+
+    #[test]
+    fn things_can_define_use_with_callbacks() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-use-with-test-{}.lua", process::id()));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  title = "Use With Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room."
+}
+
+thing "key" {
+  name = "brass key",
+  aliases = { "key" },
+  location = "start",
+  portable = true,
+
+  on_use_with = function(game, item, target)
+    game.flag("used:" .. item .. ":" .. target)
+    game.say("You use the " .. item .. " on the " .. target .. ".")
+  end
+}
+
+thing "door" {
+  name = "green door",
+  aliases = { "door" },
+  location = "start",
+  portable = false
+}
+"#,
+        )
+        .expect("test game file should write");
+
+        let mut game = LuaGame::load(&game_file).expect("use-with game loads");
+        let CommandResult::Continue(outcome) = game
+            .handle_command("use key on door")
+            .expect("use-with succeeds")
+        else {
+            panic!("use-with should continue");
+        };
+
+        assert_eq!(outcome.output, "You use the key on the door.");
+        assert!(game.game.has_flag("used:key:door"));
     }
 
     #[test]

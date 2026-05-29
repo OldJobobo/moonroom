@@ -7,8 +7,20 @@ You can see a hall table, a linen coat, and a tarnished key.
 
 Available exits: east, north.
 
+> l north
+To the north is Hall.
+
+> l exits
+Available exits: east, north.
+
+> look at key
+The key is old brass, dark with tarnish. Its teeth are cut in an unfamiliar pattern.
+
 > take key
 The key is colder than the room around it.
+
+> x it
+The key is old brass, dark with tarnish. Its teeth are cut in an unfamiliar pattern.
 
 > take coat
 You take the linen coat.

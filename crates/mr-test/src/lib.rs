@@ -15,6 +15,14 @@ pub struct Transcript {
 pub struct TranscriptStep {
     pub command: String,
     pub expected: String,
+    pub assertions: Vec<TranscriptAssertion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptAssertion {
+    Room(String),
+    Flag(String),
+    Counter { name: String, value: i64 },
 }
 
 impl Transcript {
@@ -145,10 +153,21 @@ pub fn run_transcript(
         if normalize_output(&actual) != normalize_output(&step.expected) {
             failures.push(TranscriptFailure {
                 transcript: transcript_path.to_path_buf(),
-                command: step.command,
+                command: step.command.clone(),
                 expected: step.expected,
                 actual,
             });
+        }
+
+        for assertion in step.assertions {
+            if let Some((expected, actual)) = check_assertion(&game, &assertion) {
+                failures.push(TranscriptFailure {
+                    transcript: transcript_path.to_path_buf(),
+                    command: step.command.clone(),
+                    expected,
+                    actual,
+                });
+            }
         }
     }
 
@@ -175,10 +194,9 @@ pub fn parse_transcript(path: &Path, text: &str) -> Result<Transcript, Transcrip
 
         if let Some(command) = line.strip_prefix("> ") {
             if let Some(previous_command) = current_command.replace(command.to_string()) {
-                transcript.steps.push(TranscriptStep {
-                    command: previous_command,
-                    expected: trim_trailing_blank_lines(&current_expected).join("\n"),
-                });
+                transcript
+                    .steps
+                    .push(parse_step(path, previous_command, &current_expected)?);
                 current_expected.clear();
             }
         } else if current_command.is_some() {
@@ -192,13 +210,139 @@ pub fn parse_transcript(path: &Path, text: &str) -> Result<Transcript, Transcrip
     }
 
     if let Some(command) = current_command {
-        transcript.steps.push(TranscriptStep {
-            command,
-            expected: trim_trailing_blank_lines(&current_expected).join("\n"),
-        });
+        transcript
+            .steps
+            .push(parse_step(path, command, &current_expected)?);
     }
 
     Ok(transcript)
+}
+
+fn parse_step(
+    path: &Path,
+    command: String,
+    lines: &[String],
+) -> Result<TranscriptStep, TranscriptError> {
+    let mut expected = Vec::new();
+    let mut assertions = Vec::new();
+
+    for line in lines {
+        let trimmed = line.trim();
+
+        if let Some(directive) = trimmed.strip_prefix('!') {
+            assertions.push(parse_assertion(path, directive)?);
+        } else {
+            expected.push(line.clone());
+        }
+    }
+
+    Ok(TranscriptStep {
+        command,
+        expected: trim_trailing_blank_lines(&expected).join("\n"),
+        assertions,
+    })
+}
+
+fn parse_assertion(path: &Path, directive: &str) -> Result<TranscriptAssertion, TranscriptError> {
+    let mut parts = directive.split_whitespace();
+    let Some(kind) = parts.next() else {
+        return Err(TranscriptError::InvalidTranscript {
+            path: path.to_path_buf(),
+            message: "empty transcript directive".to_string(),
+        });
+    };
+
+    match kind {
+        "room" => {
+            let room_id = parts.collect::<Vec<_>>().join(" ");
+            if room_id.is_empty() {
+                return Err(TranscriptError::InvalidTranscript {
+                    path: path.to_path_buf(),
+                    message: "!room requires a room id".to_string(),
+                });
+            }
+
+            Ok(TranscriptAssertion::Room(room_id))
+        }
+        "flag" => {
+            let flag = parts.collect::<Vec<_>>().join(" ");
+            if flag.is_empty() {
+                return Err(TranscriptError::InvalidTranscript {
+                    path: path.to_path_buf(),
+                    message: "!flag requires a flag name".to_string(),
+                });
+            }
+
+            Ok(TranscriptAssertion::Flag(flag))
+        }
+        "counter" => {
+            let Some(name) = parts.next() else {
+                return Err(TranscriptError::InvalidTranscript {
+                    path: path.to_path_buf(),
+                    message: "!counter requires a counter name and value".to_string(),
+                });
+            };
+            let Some(value) = parts.next() else {
+                return Err(TranscriptError::InvalidTranscript {
+                    path: path.to_path_buf(),
+                    message: "!counter requires a counter name and value".to_string(),
+                });
+            };
+
+            if parts.next().is_some() {
+                return Err(TranscriptError::InvalidTranscript {
+                    path: path.to_path_buf(),
+                    message: "!counter accepts exactly a counter name and integer value"
+                        .to_string(),
+                });
+            }
+
+            let value = value
+                .parse::<i64>()
+                .map_err(|_| TranscriptError::InvalidTranscript {
+                    path: path.to_path_buf(),
+                    message: "!counter value must be an integer".to_string(),
+                })?;
+
+            Ok(TranscriptAssertion::Counter {
+                name: name.to_string(),
+                value,
+            })
+        }
+        _ => Err(TranscriptError::InvalidTranscript {
+            path: path.to_path_buf(),
+            message: format!("unknown transcript directive '!{kind}'"),
+        }),
+    }
+}
+
+fn check_assertion(game: &LuaGame, assertion: &TranscriptAssertion) -> Option<(String, String)> {
+    match assertion {
+        TranscriptAssertion::Room(room_id) => {
+            let actual = game.current_room_id();
+            (actual != room_id).then(|| {
+                (
+                    format!("!room {room_id}"),
+                    format!("!room {}", game.current_room_id()),
+                )
+            })
+        }
+        TranscriptAssertion::Flag(flag) => (!game.has_flag(flag)).then(|| {
+            (
+                format!("!flag {flag}"),
+                format!("flag '{flag}' was not set"),
+            )
+        }),
+        TranscriptAssertion::Counter { name, value } => {
+            let actual = game.counter(name);
+            (actual != *value).then(|| {
+                (
+                    format!("!counter {name} {value}"),
+                    format!("!counter {name} {actual}"),
+                )
+            })
+        }
+    }
 }
 
 fn trim_trailing_blank_lines(lines: &[String]) -> Vec<String> {
@@ -237,8 +381,103 @@ Taken.
         assert_eq!(transcript.steps.len(), 2);
         assert_eq!(transcript.steps[0].command, "look");
         assert_eq!(transcript.steps[0].expected, "Room\n\nDescription.");
+        assert!(transcript.steps[0].assertions.is_empty());
         assert_eq!(transcript.steps[1].command, "take coin");
         assert_eq!(transcript.steps[1].expected, "Taken.");
+    }
+
+    #[test]
+    fn parses_state_assertion_directives() {
+        let transcript = parse_transcript(
+            Path::new("example.transcript"),
+            r#"> take coin
+Taken.
+!room garden
+!flag took_coin
+!counter visits 2
+"#,
+        )
+        .expect("transcript should parse");
+
+        assert_eq!(transcript.steps.len(), 1);
+        assert_eq!(transcript.steps[0].expected, "Taken.");
+        assert_eq!(
+            transcript.steps[0].assertions,
+            vec![
+                TranscriptAssertion::Room("garden".to_string()),
+                TranscriptAssertion::Flag("took_coin".to_string()),
+                TranscriptAssertion::Counter {
+                    name: "visits".to_string(),
+                    value: 2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn runs_state_assertion_directives() {
+        let project_dir =
+            std::env::temp_dir().join(format!("moonroom-directive-test-{}", std::process::id()));
+        let tests_dir = project_dir.join("tests");
+        fs::create_dir_all(&tests_dir).expect("test project should be created");
+        fs::write(
+            project_dir.join("game.lua"),
+            r#"
+game {
+  title = "Directive Test",
+  start = "start"
+}
+
+room "start" {
+  name = "Start",
+  desc = "A start room.",
+  exits = {
+    north = "garden"
+  }
+}
+
+room "garden" {
+  name = "Garden",
+  desc = "A garden."
+}
+
+thing "coin" {
+  name = "coin",
+  aliases = { "coin" },
+  location = "start",
+  portable = true,
+
+  on_take = function(game)
+    game.flag("took_coin")
+    game.set_counter("coins", 1)
+  end
+}
+"#,
+        )
+        .expect("game should be written");
+        let transcript_path = tests_dir.join("directives.transcript");
+        fs::write(
+            &transcript_path,
+            r#"> take coin
+You take the coin.
+!flag took_coin
+!counter coins 1
+
+> north
+Garden
+
+A garden.
+!room garden
+"#,
+        )
+        .expect("transcript should be written");
+
+        let failures =
+            run_transcript(&project_dir, &transcript_path).expect("transcript should run");
+
+        assert!(failures.is_empty());
+
+        fs::remove_dir_all(project_dir).expect("temporary project should be removed");
     }
 
     #[test]

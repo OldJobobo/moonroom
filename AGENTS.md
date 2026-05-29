@@ -138,6 +138,8 @@ Things can define `read` text plus `on_take`, `on_drop`, `on_read`, `on_open`, `
 
 Openable things use `openable = true` and optional initial `open = true`. Lockable things use `lockable = true`, optional initial `locked = true`, and optional `key = "thing_id"`. Open/locked state lives in `GameState.open_things` and `GameState.locked_things`.
 
+Things can start hidden with `hidden = true`. Hidden things are omitted from room descriptions, container/supporter contents, inventory listings, and parser matching until Lua calls `game.reveal("thing_id")`. Lua can call `game.hide("thing_id")` to hide a thing again and `game.visible("thing_id")` to query reveal state. Hidden/revealed state lives in `GameState.hidden_things`.
+
 Things can be marked `actor = true` and can define `on_talk = function(game) ... end`. Actors can also define `topics = { key = function(game) ... end }` for `ask actor about key`.
 
 Core parser support includes `look in box`, `look on table`, `put key in box`, `put key on table`, `take key from box`, `open box`, `close box`, `unlock chest with key`, `lock chest`, `use key`, `wear coat`, `remove coat`, `talk to caretaker`, `ask caretaker about key`, `again`/`g`, and `undo`.
@@ -161,9 +163,13 @@ Transcript files live under a game project's `tests/` directory and use command 
 Room Name
 
 Expected output.
+
+> take key
+You take the key.
+!flag touched_key
 ```
 
-Each block compares the output for that command only. Do not include prompt text in expected output.
+Each block compares the output for that command only. Do not include prompt text in expected output. Assertion directives beginning with `!` are checked after the command and are excluded from output comparison. Supported directives are `!room room_id`, `!flag flag_name`, and `!counter counter_name integer_value`.
 
 ## Notes
 

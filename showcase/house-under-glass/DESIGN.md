@@ -180,28 +180,62 @@ the sense that the house can breathe again
 
 The final scene should feel like opening windows after rain.
 
-## Mechanical Priorities
+## Mechanical Design
 
-The showcase wants mechanics that let the house bind things, conceal things, preserve things, and tempt the player with one more locked room.
+The showcase should use mechanics that let the house bind things, conceal things, preserve things, and tempt the player with one more locked room. Most of the required engine pieces now exist, so design work should focus on making those pieces feel like part of the house rather than a checklist of parser features.
 
-Prioritize:
+Use current Moonroom features this way:
 
 ```text
 read
+  The ledger, notes, labels, and inscriptions should reveal names the house has tried to keep.
+
 open / close
+  Opened things should feel like interrupted preservation: a box, pane, cabinet, curtain, or door letting air into a sealed arrangement.
+
 lock / unlock
+  Locks should represent withheld trust. Unlocking should require context, not just possession.
+
 hidden / revealed
+  Reveals should come from attention: reading, revisiting, asking, showing, opening, or wearing the right thing.
+
 object state
-scenery
+  Open, locked, worn, hidden, counters, timers, scene, chapter, and actor memory should carry the real puzzle state because they survive save/load and undo.
+
+containers and supporters
+  Use containers for things the house has put away. Use supporters for things the house displays as if display were care.
+
+wearables
+  The linen coat should become a small ritual object: useful, protective, and a sign that the player is participating in the house's manners.
+
+dialogue topics
+  The caretaker should change with evidence. Ask, tell, show, and give should have distinct emotional meanings.
+
+scenes and chapters
+  Use chapters to mark understanding, not geography. Use scenes for temporary pressures such as rain memory or the Glass Room sequence.
+
+transcripts and packaging
+  Treat transcript tests and packaged builds as part of the game design. If a beat cannot survive testing and release, it is probably too fragile.
 ```
 
-`read` matters for the ledger. `open`, `close`, `lock`, and `unlock` matter for making preservation physical. Hidden/revealed and scenery objects matter for making the house feel detailed without cluttering every room listing.
+Feature gaps to keep in mind:
+
+```text
+scenery
+  Still valuable for dense room detail without cluttered listings. Until it exists, keep nonportable detail objects sparse and clearly useful.
+
+light / dark rooms
+  A future fit for the upstairs or Glass Room, but not required for the next expansion.
+```
 
 ## Concrete Next Additions
 
-1. Add openable and lockable object state.
+1. Add stable `id` and `version` metadata to `game.lua`.
 2. Add the Conservatory as the next room.
-3. Make the ledger unlock additional caretaker topics.
-4. Add a recurring phrase in room descriptions: `kept safe`.
-5. Let the player discover that `safe` and `trapped` are the same word to the house.
-6. Design the Glass Room as a beautiful memory, not a boss room.
+3. Add a wooden box or cabinet that demonstrates open/close, container state, and a hidden clue.
+4. Make the ledger advance the chapter and unlock additional caretaker topics.
+5. Add ask/tell/show/give variants for the caretaker around the key, ledger, and glass room.
+6. Add a recurring phrase in room descriptions: `kept safe`.
+7. Let the player discover that `safe` and `trapped` are the same word to the house.
+8. Design the Glass Room as a beautiful memory, not a boss room.
+9. Keep the final release shape in mind: source folder first, `.moon` package second, standalone binary last.

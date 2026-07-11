@@ -598,6 +598,22 @@ impl LuaGame {
         match result {
             CommandResult::Continue(mut outcome) => {
                 let events = outcome.events.clone();
+                let batched_thing_event_count = events
+                    .iter()
+                    .filter(|event| {
+                        matches!(event, GameEvent::Take { .. } | GameEvent::Drop { .. })
+                    })
+                    .count();
+                let mut batched_thing_outputs = (batched_thing_event_count > 1)
+                    .then(|| {
+                        outcome
+                            .output
+                            .lines()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|outputs| outputs.len() == batched_thing_event_count);
+                let mut batched_thing_index = 0;
 
                 for event in events {
                     match event {
@@ -621,15 +637,27 @@ impl LuaGame {
                             if let Some(output) =
                                 self.run_thing_callback(&thing_id, ThingCallback::Take)?
                             {
-                                outcome.output = output;
+                                if let Some(outputs) = &mut batched_thing_outputs {
+                                    outputs[batched_thing_index] = output;
+                                    outcome.output = outputs.join("\n");
+                                } else {
+                                    outcome.output = output;
+                                }
                             }
+                            batched_thing_index += 1;
                         }
                         GameEvent::Drop { thing_id } => {
                             if let Some(output) =
                                 self.run_thing_callback(&thing_id, ThingCallback::Drop)?
                             {
-                                outcome.output = output;
+                                if let Some(outputs) = &mut batched_thing_outputs {
+                                    outputs[batched_thing_index] = output;
+                                    outcome.output = outputs.join("\n");
+                                } else {
+                                    outcome.output = output;
+                                }
                             }
+                            batched_thing_index += 1;
                         }
                         GameEvent::Use { thing_id } => {
                             if let Some(output) =
@@ -1761,12 +1789,20 @@ fn collect_package_files(
     entries.sort();
 
     for path in entries {
-        let metadata = fs::metadata(&path).map_err(|source| LuaLoadError::Io {
+        let metadata = fs::symlink_metadata(&path).map_err(|source| LuaLoadError::Io {
             path: path.clone(),
             source,
         })?;
 
-        if metadata.is_dir() {
+        if metadata.file_type().is_symlink() {
+            return Err(LuaLoadError::InvalidPackage {
+                path: root.to_path_buf(),
+                message: format!(
+                    "package entry '{}' is a symbolic link; symbolic links are not supported",
+                    path.display()
+                ),
+            });
+        } else if metadata.is_dir() {
             collect_package_files(root, &path, files)?;
         } else if metadata.is_file() {
             let relative = path
@@ -2807,6 +2843,46 @@ thing "coin" {
     }
 
     #[test]
+    fn take_all_preserves_each_thing_callback_output() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-take-all-test-{}.lua", process::id()));
+        fs::write(
+            &game_file,
+            r#"
+game { title = "Take All Test", start = "start" }
+
+room "start" { name = "Start", desc = "A test room." }
+
+thing "apple" {
+  name = "apple",
+  location = "start",
+  portable = true,
+  on_take = function(game) game.say("Apple callback.") end
+}
+
+thing "book" {
+  name = "book",
+  location = "start",
+  portable = true,
+  on_take = function(game) game.say("Book callback.") end
+}
+"#,
+        )
+        .expect("test game file should write");
+
+        let mut game = LuaGame::load(&game_file).expect("test game should load");
+        let CommandResult::Continue(outcome) = game
+            .handle_command("take all")
+            .expect("take all should succeed")
+        else {
+            panic!("take all should continue");
+        };
+
+        assert_eq!(outcome.output, "Apple callback.\nBook callback.");
+        let _ = fs::remove_file(game_file);
+    }
+
+    #[test]
     fn moon_packages_load_project_local_includes() {
         let game_dir =
             std::env::temp_dir().join(format!("moonroom-package-test-{}", process::id()));
@@ -2857,6 +2933,41 @@ room "start" {
         let _ = fs::remove_dir_all(game_dir);
         let _ = fs::remove_file(package_path);
         let _ = fs::remove_dir_all(unpacked_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let game_dir =
+            std::env::temp_dir().join(format!("moonroom-package-symlink-test-{}", process::id()));
+        let outside_file = std::env::temp_dir().join(format!(
+            "moonroom-package-symlink-outside-test-{}",
+            process::id()
+        ));
+        fs::create_dir_all(&game_dir).expect("test game dir should create");
+        fs::write(
+            game_dir.join("game.lua"),
+            r#"
+game { title = "Package Symlink Test", start = "start" }
+room "start" { name = "Start", desc = "A test room." }
+"#,
+        )
+        .expect("entrypoint should write");
+        fs::write(&outside_file, "must not be packaged").expect("outside file should write");
+        symlink(&outside_file, game_dir.join("leak.txt")).expect("symlink should create");
+
+        let error = pack_game_directory_to_bytes(&game_dir)
+            .expect_err("packaging a symbolic link should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("symbolic links are not supported")
+        );
+        let _ = fs::remove_dir_all(game_dir);
+        let _ = fs::remove_file(outside_file);
     }
 
     #[test]

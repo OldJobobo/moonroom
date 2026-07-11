@@ -1133,15 +1133,14 @@ impl Game {
             return CommandOutcome::new("You don't see that here.");
         };
 
-        if let Some(source_id) = source_id {
-            if self
+        if let Some(source_id) = source_id
+            && self
                 .state
                 .thing_locations
                 .get(&id)
                 .is_none_or(|location| location != &source_id)
-            {
-                return CommandOutcome::new("That isn't there.");
-            }
+        {
+            return CommandOutcome::new("That isn't there.");
         }
 
         let thing = self

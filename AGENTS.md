@@ -1,15 +1,36 @@
 # Moonroom Agent Notes
 
-Moonroom is a Rust workspace for an interactive fiction engine with Lua-authored game worlds. Treat `PLAN.md` as the product roadmap and `README.md` as the current user-facing quickstart.
+Moonroom is a Rust workspace for an interactive fiction engine with Lua-authored game worlds. Treat `PLAN.md` as the active 0.1 release plan and architecture contract, `ROADMAP.md` as deferred product direction, and `README.md` as the current user-facing quickstart.
 
 ## Workspace
 
 - `crates/mr-core`: serializable world model, game state, parser/action handling, and core events.
 - `crates/mr-lua`: Lua DSL loading, callback registry, controlled `game` API, and JSON save/load of Rust-owned state.
-- `crates/mr-cli`: `moonroom play`, `moonroom test`, `moonroom check`, and `moonroom new`.
+- `crates/mr-cli`: command-line play, author tooling, packaging, and standalone builds.
 - `crates/mr-test`: transcript parsing and test runner.
 - `examples/house`: the main integration example.
+- `showcase/house-under-glass`: the release-driving proof game.
 - `docs/lua-dsl.md`: author-facing Lua DSL reference.
+
+## Release Focus
+
+The next target is Moonroom 0.1: a dependable authoring release proving this complete workflow:
+
+```text
+create a game -> author it -> check it -> test it -> package it -> play it
+```
+
+Work through the active phases in `PLAN.md` in order unless a later task directly unblocks an earlier one:
+
+1. Author feedback and actionable diagnostics.
+2. Parser correctness and deterministic ambiguity handling.
+3. Save and package safety.
+4. Author documentation.
+5. The 0.1 release workflow and polished showcase.
+
+Prefer correctness, diagnostics, compatibility fixtures, and the House Under Glass release path over expanding the DSL. Add scenery before 0.1 only if the showcase materially needs it. Keep darkness/light, edible or drinkable things, plural pronouns, declarative dialogue, hot reload, `game.choice()`, TUI, browser, and WASM work in `ROADMAP.md` until their prerequisites and concrete user need are proven.
+
+Do not silently promote a `ROADMAP.md` idea into active work. Move it into `PLAN.md` only with a release target, bounded acceptance criteria, defined Rust/Lua ownership, save and undo behavior, validation, tests, and documentation.
 
 ## Useful Commands
 
@@ -70,6 +91,8 @@ cargo test --workspace
 cargo run -q -p mr-cli -- check examples/house
 cargo run -q -p mr-cli -- test examples/house
 cargo run -q -p mr-cli -- inspect examples/house
+cargo run -q -p mr-cli -- check showcase/house-under-glass
+cargo run -q -p mr-cli -- test showcase/house-under-glass
 ```
 
 The root `./test` helper launches the interactive `examples/house` game.
@@ -214,5 +237,5 @@ Each block compares the output for that command only. Do not include prompt text
 
 ## Notes
 
-- The repo may not behave as a valid Git repository in this environment because `.git` is currently an empty directory.
 - `save.json` is ignored and should be treated as local runtime output.
+- Lua projects and `.moon` packages are trusted executable content. Robust input limits do not constitute a sandbox.

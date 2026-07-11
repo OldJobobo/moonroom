@@ -218,7 +218,8 @@ docs/lua-dsl.md  author-facing Lua DSL reference
 ## Documentation
 
 - [Lua DSL reference](docs/lua-dsl.md)
-- [Project plan](PLAN.md)
+- [Active release plan and architecture contract](PLAN.md)
+- [Long-term roadmap](ROADMAP.md)
 - [Agent notes](AGENTS.md)
 
 ## Current Status

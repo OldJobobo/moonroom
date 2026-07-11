@@ -4,7 +4,7 @@ Moonroom is a Rust engine for parser-based interactive fiction with Lua-authored
 
 Rust owns parsing, saveable state, action rules, testing, packaging, and frontends. Lua owns author definitions and scripted callbacks through a controlled `game` API. Lua runtime state is never the save format.
 
-This document is the product roadmap and architecture contract. `README.md` is the current quickstart and `docs/lua-dsl.md` is the author-facing DSL reference.
+This document is the active release plan and architecture contract. `ROADMAP.md` holds later product directions, `README.md` is the current quickstart, and `docs/lua-dsl.md` is the author-facing DSL reference.
 
 ## Status
 
@@ -252,149 +252,100 @@ Robustness work should add:
 - Standalone executable smoke tests.
 - Cross-platform CI for supported targets.
 
-## Roadmap
+## Active Release Plan
 
-### Milestones 1–6: Foundation — Shipped
+Moonroom's next target is **0.1: a dependable authoring release**. The release is not a promise to finish every possible parser-fiction feature. It proves one complete workflow:
 
-Delivered:
+```text
+create a game -> author it -> check it -> test it -> package it -> play it
+```
 
-- Playable Rust CLI and Lua-authored world loading.
-- Rooms, things, movement, inventory, core actions, flags, counters, callbacks, and custom verbs.
-- Serializable state, deterministic RNG, JSON save/load, and transcript testing.
-- Project templates, examples, documentation, and interactive command history.
-- Containers, supporters, locks, wearables, actors, timers, scenes, and chapters.
-- Multi-file projects with safe local includes.
+The House Under Glass is the release-driving fixture. Work enters 0.1 only when it improves that workflow, closes a correctness or trust gap, or is needed to ship the showcase. Other ideas belong in `ROADMAP.md`.
 
-Hot reload was not delivered and is not implied by foundation status. It remains a separate design task because reloading definitions while preserving Rust-owned state needs compatibility rules for removed or changed rooms, things, callbacks, and events.
+### Phase 1: Author feedback
 
-### Milestone 7: Parser quality — In progress
+Goal: authors can correct common project mistakes without reading Rust or Lua stack traces.
 
-Shipped:
+- Add structured diagnostics with severity, source path, and an actionable message.
+- Report DSL source context where Lua loading provides enough location information.
+- Extend static checks to callback and event references that can be resolved without executing gameplay.
+- Add invalid-project fixtures covering each diagnostic class.
 
-- `again` and bounded `undo`.
-- Recent singular-object pronoun resolution.
-- Common verbs including open, close, lock, unlock, read, give, and show.
-- Article-insensitive and normalized object matching.
+Exit criteria:
 
-Remaining:
+- `moonroom check` distinguishes errors from warnings.
+- Every supported diagnostic has a stable test and a corrective message.
+- The generated starter project passes with no warnings.
 
-- Ambiguity detection and disambiguation when multiple reachable things match.
-- A deliberate policy for plural references such as `them`.
-- More context-sensitive parser failures.
-- Property tests for normalization and object resolution.
+### Phase 2: Parser correctness
 
-Done when ambiguous input never silently selects an arbitrary object and the behavior is covered in core, Lua, and transcript tests.
+Goal: valid commands never resolve an ambiguous object arbitrarily.
 
-### Milestone 8: Object state — In progress
+- Detect multiple reachable object matches.
+- Add a bounded disambiguation interaction or require a more specific command; choose the smaller design that preserves deterministic transcripts.
+- Improve failures for inaccessible, hidden, closed-container, and wrong-context objects.
+- Add normalization and resolution property tests.
+- Document singular pronoun behavior and explicitly defer plural pronouns unless the showcase requires them.
 
-Shipped:
+Exit criteria:
 
-- Openable containers, lockable things, keys, guarded exits, hidden/revealed things, containers, supporters, and wearables.
+- Ambiguous input has deterministic, tested behavior in core, Lua-backed play, and transcripts.
+- Parser failures explain the relevant corrective action without revealing hidden objects.
 
-Remaining, in recommended order:
+### Phase 3: Save and package safety
 
-1. Scenery things that remain inspectable but do not clutter room listings.
-2. Dark rooms and explicit light sources.
-3. Edible and drinkable things, only if a showcase puzzle demonstrates their value.
+Goal: ordinary corruption or oversized input fails safely, and 0.1 defines what it will preserve.
 
-Done when each property is Rust-owned, serializable, undoable, statically validated, documented, and exercised by transcript fixtures.
+- Write saves atomically through a temporary file and rename.
+- Define the game-version compatibility policy and engine save-version migration policy.
+- Add fixtures for the legacy raw state and every supported versioned envelope.
+- Add save and package byte, file-count, decoded-size, nesting, and path-length limits.
+- Test truncated saves, malformed packages, duplicate virtual paths, and traversal attempts.
+- Document that Lua content remains trusted executable code; resource limits are not a sandbox.
 
-### Milestone 9: Dialogue — In progress
+Exit criteria:
 
-Shipped:
+- Failed writes do not destroy the last valid save.
+- Unsupported or corrupt inputs produce bounded, actionable errors.
+- Compatibility promises are documented before the first tagged release.
 
-- Actors, talk, topic aliases, topic requirements, ask/tell/show/give callbacks, and actor memory.
+### Phase 4: Author documentation
 
-Remaining:
+Goal: a new author can build and test a small game without reconstructing behavior from examples.
 
-- Decide whether multi-step conversation needs a declarative dialogue model or is adequately represented by actor memory and scenes.
-- Do not add `game.choice()` until the engine can suspend an interaction and request structured input through the frontend-neutral session protocol.
+- Write a first-game tutorial.
+- Add a parser command reference.
+- Add a transcript testing guide.
+- Add a focused cookbook for locks, containers, hidden objects, NPC topics, timers, scenes, deterministic randomness, and save-compatible puzzle state.
+- Add a packaging and save-compatibility guide.
 
-Done when a showcase conversation can support a multi-step puzzle without storing required progress in Lua globals.
+Exit criteria:
 
-### Milestone 10: Scenes and chapters — Shipped
+- The tutorial produces a project accepted by `check` and `test`.
+- Every starter DSL feature links to its authoritative documentation.
 
-Delivered current scene/chapter state, lifecycle hooks, scene-scoped timers, and transcript assertions. Future work here should be driven by a concrete story requirement.
+### Phase 5: 0.1 release
 
-### Milestone 11: Author tooling — In progress
+Goal: ship one supported release path and a polished proof game.
 
-Shipped:
+- Finish and test The House Under Glass as the release showcase.
+- Define the initial supported host platforms.
+- Add CI for formatting, strict Clippy, workspace tests, example checks, package round-trips, and standalone smoke tests on those platforms.
+- Define the install workflow and release profile.
+- Produce versioned artifacts and checksums.
+- Run the complete author workflow from a clean checkout using only published documentation.
 
-- `moonroom check`, `inspect`, and transcript recording.
-- Validation for world graph errors, object locations, guarded exits, and duplicate vocabulary.
-- Lua source paths in load failures.
+Exit criteria:
 
-Remaining:
+- The showcase passes static checks and all transcripts from both its source tree and packaged form.
+- A fresh user can install Moonroom, create the starter, test it, package it, and run it on each supported platform.
+- Release artifacts are reproducible enough to identify their source revision and verify integrity.
 
-- Better DSL-specific source context and actionable diagnostics.
-- Optional warnings distinct from fatal validation errors.
-- Validation of callback/event references where statically possible.
-- Stable machine-readable diagnostics if editor integration is pursued.
+## Scope Rules
 
-Done when common author mistakes are reported before play with a source location, severity, and corrective message.
-
-### Milestone 12: Save hardening — In progress
-
-Shipped versioned envelopes, identity checks, pretty/compact JSON, and legacy raw-state loading.
-
-Remaining work is the save contract described above: atomic writes, corruption handling, explicit game-version policy, real migrations, input limits, and compatibility fixtures.
-
-### Milestone 13: Testing — Shipped, ongoing
-
-Delivered transcript assertions, filtering, golden update mode, seed overrides, command-context failures, and regression fixtures. Robustness and cross-platform testing remain continuous quality work rather than a closed feature milestone.
-
-### Milestone 14: Packaging and distribution — In progress
-
-Shipped folder/package loading, pack/unpack, package-aware play/check/test/inspect, and host-platform standalone builds.
-
-Remaining:
-
-- The package trust and resource limits described above.
-- Installed-release workflow and supported-platform matrix.
-- Release profile and standalone smoke checks.
-- Checksums and versioned release artifacts.
-- Clear project/package versioning documentation.
-
-Done when a user can install Moonroom and run a packaged game on every supported platform without a source checkout.
-
-### Milestone 15: Frontends — Planned
-
-Order:
-
-1. Define and test the frontend-neutral session and structured output boundary.
-2. Add versioned JSON input/output mode for external clients.
-3. Build `mr-tui` only if it materially improves play or author testing.
-4. Consider a browser frontend after the JSON/session contract is stable.
-5. Investigate WASM only after confirming that Lua runtime constraints and package loading are acceptable.
-
-The CLI remains canonical throughout this work.
-
-### Milestone 16: Documentation as product — In progress
-
-Feature documentation is continuous and part of the quality contract. Dedicated remaining deliverables are:
-
-- A first-game tutorial.
-- A parser command reference.
-- A save compatibility and migration guide.
-- A transcript testing guide.
-- A focused cookbook covering locks, NPC topics, timers, hidden objects, containers, deterministic randomness, scenes, and save-compatible puzzle state.
-
-The DSL reference may be split by topic when navigation becomes a real problem; file splitting is not itself a product goal.
-
-### Milestone 17: Engine contract hardening — Shipped
-
-Delivered explicit command transactions across core-only and Lua-backed play, complete Rust-state rollback on callback failure, post-action timer processing, consistent intercepted-action semantics, snapshot-based undo including parser reference state, and regression coverage for interception, room/action/after/timer failures, `again`, and `undo`. The DSL reference documents the final behavior and the current trusted-content boundary.
-
-## Recommended Next Work
-
-Execute in this order:
-
-1. Broader `moonroom check` diagnostics and source context.
-2. Scenery things.
-3. Darkness and light sources.
-4. Parser ambiguity and disambiguation.
-5. Save atomicity, compatibility policy, and migration fixtures.
-6. Package resource limits and malformed-input hardening.
-7. Frontend-neutral session and structured output protocol.
-
-Do not start hot reload, `game.choice()`, TUI, browser, or WASM work until their required state-compatibility or frontend protocol contracts are in place.
+- Complete phases in order unless a later-phase task is required to unblock an earlier one.
+- Prefer correctness, diagnostics, and fixtures over expanding the DSL.
+- Add scenery only if it materially improves the showcase before 0.1.
+- Defer darkness, light sources, edible/drinkable things, declarative dialogue, and plural pronouns until a shipped story demonstrates the need.
+- Do not start hot reload, `game.choice()`, a TUI, browser support, or WASM before the frontend-neutral session contract exists.
+- Do not claim untrusted-game sandboxing until Lua capabilities and enforceable runtime limits have been designed and tested as a security boundary.

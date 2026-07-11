@@ -9,8 +9,8 @@ use std::{
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 use mr_core::{
     ActorTopic, CommandOutcome, CommandResult, CustomVerb, Exit, ExitDisplaySettings, Game,
-    GameError, GameEvent, GameMetadata, GameSettings, GameState, Room, Thing, ThingKind, World,
-    random_bounded,
+    GameError, GameEvent, GameMetadata, GameSettings, GameSnapshot, GameState, Room, Thing,
+    ThingKind, World, random_bounded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -225,8 +225,9 @@ pub struct LuaGame {
     lua: Lua,
     game: Game,
     callbacks: CallbackRegistry,
-    undo_stack: Vec<GameState>,
+    undo_stack: Vec<GameSnapshot>,
     last_command: Option<String>,
+    turn_pending: bool,
 }
 
 pub fn load_game(path: impl AsRef<Path>) -> Result<World, LuaLoadError> {
@@ -355,6 +356,7 @@ impl LuaGame {
             callbacks: loaded.callbacks,
             undo_stack: Vec::new(),
             last_command: None,
+            turn_pending: false,
         })
     }
 
@@ -573,209 +575,225 @@ impl LuaGame {
         }
 
         if normalized == "undo" {
-            let Some(state) = self.undo_stack.pop() else {
+            let Some(snapshot) = self.undo_stack.pop() else {
                 return Ok(CommandResult::Continue(CommandOutcome::new(
                     "Nothing to undo.",
                 )));
             };
 
-            self.game.restore_state_for_undo(state)?;
+            self.game.restore_snapshot(snapshot)?;
             return Ok(CommandResult::Continue(CommandOutcome::new("Undone.")));
         }
 
-        let advances_turn = command_advances_turn(&normalized);
-        let pre_command_state = advances_turn.then(|| self.game.state().clone());
-
-        if !normalized.is_empty()
-            && !is_quit_command(&normalized)
-            && let Some(output) = self.run_action_callback(ActionCallback::Before, &normalized)?
-        {
-            return Ok(CommandResult::Continue(CommandOutcome::new(output)));
+        if normalized.is_empty() {
+            return Ok(CommandResult::Continue(CommandOutcome::new("")));
         }
 
-        let result = self.game.handle_command(input)?;
+        if is_quit_command(&normalized) {
+            return self
+                .game
+                .execute_normalized_command(&normalized)
+                .map_err(Into::into);
+        }
+
+        let advances_turn = command_advances_turn(&normalized);
+        let snapshot = self.game.snapshot();
+        self.turn_pending = advances_turn;
+
+        let result = self.run_command_transaction(&normalized, advances_turn);
+        self.turn_pending = false;
 
         match result {
-            CommandResult::Continue(mut outcome) => {
-                let events = outcome.events.clone();
-                let batched_thing_event_count = events
-                    .iter()
-                    .filter(|event| {
-                        matches!(event, GameEvent::Take { .. } | GameEvent::Drop { .. })
-                    })
-                    .count();
-                let mut batched_thing_outputs = (batched_thing_event_count > 1)
-                    .then(|| {
-                        outcome
-                            .output
-                            .lines()
-                            .map(str::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|outputs| outputs.len() == batched_thing_event_count);
-                let mut batched_thing_index = 0;
-
-                for event in events {
-                    match event {
-                        GameEvent::Look { room_id } => {
-                            outcome.output = self.render_room()?;
-                            if let Some(output) =
-                                self.run_room_callback(&room_id, RoomCallback::Look)?
-                            {
-                                outcome.output = append_output(outcome.output, output);
-                            }
-                        }
-                        GameEvent::EnterRoom { room_id } => {
-                            outcome.output = self.render_room()?;
-                            if let Some(output) =
-                                self.run_room_callback(&room_id, RoomCallback::Enter)?
-                            {
-                                outcome.output = append_output(outcome.output, output);
-                            }
-                        }
-                        GameEvent::Take { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Take)?
-                            {
-                                if let Some(outputs) = &mut batched_thing_outputs {
-                                    outputs[batched_thing_index] = output;
-                                    outcome.output = outputs.join("\n");
-                                } else {
-                                    outcome.output = output;
-                                }
-                            }
-                            batched_thing_index += 1;
-                        }
-                        GameEvent::Drop { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Drop)?
-                            {
-                                if let Some(outputs) = &mut batched_thing_outputs {
-                                    outputs[batched_thing_index] = output;
-                                    outcome.output = outputs.join("\n");
-                                } else {
-                                    outcome.output = output;
-                                }
-                            }
-                            batched_thing_index += 1;
-                        }
-                        GameEvent::Use { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Use)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::UseWith { item_id, target_id } => {
-                            if let Some(output) =
-                                self.run_use_with_callback(&item_id, &target_id)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Read { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Read)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Open { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Open)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Close { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Close)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Lock { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Lock)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Unlock { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Unlock)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Talk { thing_id } => {
-                            if let Some(output) =
-                                self.run_thing_callback(&thing_id, ThingCallback::Talk)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Ask { thing_id, topic } => {
-                            if let Some(output) = self.run_ask_callback(&thing_id, &topic)? {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Tell { thing_id, topic } => {
-                            if let Some(output) = self.run_tell_callback(&thing_id, &topic)? {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Show { thing_id, item_id } => {
-                            if let Some(output) =
-                                self.run_item_callback(&thing_id, &item_id, ItemCallback::Show)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::Give { thing_id, item_id } => {
-                            if let Some(output) =
-                                self.run_item_callback(&thing_id, &item_id, ItemCallback::Give)?
-                            {
-                                outcome.output = output;
-                            }
-                        }
-                        GameEvent::CustomVerb { verb_id, input } => {
-                            outcome.output = self
-                                .run_verb_callback(&verb_id, &input)?
-                                .unwrap_or_else(|| "Nothing happens.".to_string());
-                        }
-                        GameEvent::Timer { event_name } => {
-                            if let Some(output) = self.run_event_callback(&event_name)? {
-                                outcome.output = append_output(outcome.output, output);
-                            }
-                        }
-                    }
+            Ok(outcome) => {
+                if advances_turn {
+                    self.remember_successful_command(snapshot, normalized);
                 }
 
-                if !normalized.is_empty()
-                    && let Some(output) =
-                        self.run_action_callback(ActionCallback::After, &normalized)?
-                {
-                    outcome.output = append_output(outcome.output, output);
-                }
-
-                self.remember_successful_command(pre_command_state, normalized);
                 Ok(CommandResult::Continue(outcome))
             }
-            CommandResult::Quit(output) => Ok(CommandResult::Quit(output)),
+            Err(error) => {
+                self.game.restore_snapshot(snapshot)?;
+                Err(error)
+            }
         }
     }
 
-    fn remember_successful_command(
+    fn run_command_transaction(
         &mut self,
-        pre_command_state: Option<GameState>,
-        command: String,
-    ) {
-        let Some(state) = pre_command_state else {
-            return;
+        normalized: &str,
+        advances_turn: bool,
+    ) -> Result<CommandOutcome, LuaRunError> {
+        let intercepted = self.run_action_callback(ActionCallback::Before, normalized)?;
+
+        let mut outcome = if let Some(output) = intercepted {
+            CommandOutcome::new(output)
+        } else {
+            let CommandResult::Continue(mut outcome) =
+                self.game.execute_normalized_command(normalized)?
+            else {
+                unreachable!("quit commands are handled before starting a transaction");
+            };
+            let events = outcome.events.clone();
+            self.apply_game_events(&mut outcome, events)?;
+            outcome
         };
 
-        self.undo_stack.push(state);
+        if let Some(output) = self.run_action_callback(ActionCallback::After, normalized)? {
+            outcome.output = append_output(outcome.output, output);
+        }
+
+        if advances_turn {
+            self.turn_pending = false;
+            let timer_events = self.game.advance_turn();
+            outcome.events.extend(timer_events.clone());
+            self.apply_game_events(&mut outcome, timer_events)?;
+        }
+
+        Ok(outcome)
+    }
+
+    fn apply_game_events(
+        &mut self,
+        outcome: &mut CommandOutcome,
+        events: Vec<GameEvent>,
+    ) -> Result<(), LuaRunError> {
+        let batched_thing_event_count = events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::Take { .. } | GameEvent::Drop { .. }))
+            .count();
+        let mut batched_thing_outputs = (batched_thing_event_count > 1)
+            .then(|| {
+                outcome
+                    .output
+                    .lines()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|outputs| outputs.len() == batched_thing_event_count);
+        let mut batched_thing_index = 0;
+
+        for event in events {
+            match event {
+                GameEvent::Look { room_id } => {
+                    outcome.output = self.render_room()?;
+                    if let Some(output) = self.run_room_callback(&room_id, RoomCallback::Look)? {
+                        outcome.output = append_output(std::mem::take(&mut outcome.output), output);
+                    }
+                }
+                GameEvent::EnterRoom { room_id } => {
+                    outcome.output = self.render_room()?;
+                    if let Some(output) = self.run_room_callback(&room_id, RoomCallback::Enter)? {
+                        outcome.output = append_output(std::mem::take(&mut outcome.output), output);
+                    }
+                }
+                GameEvent::Take { thing_id } => {
+                    if let Some(output) = self.run_thing_callback(&thing_id, ThingCallback::Take)? {
+                        if let Some(outputs) = &mut batched_thing_outputs {
+                            outputs[batched_thing_index] = output;
+                            outcome.output = outputs.join("\n");
+                        } else {
+                            outcome.output = output;
+                        }
+                    }
+                    batched_thing_index += 1;
+                }
+                GameEvent::Drop { thing_id } => {
+                    if let Some(output) = self.run_thing_callback(&thing_id, ThingCallback::Drop)? {
+                        if let Some(outputs) = &mut batched_thing_outputs {
+                            outputs[batched_thing_index] = output;
+                            outcome.output = outputs.join("\n");
+                        } else {
+                            outcome.output = output;
+                        }
+                    }
+                    batched_thing_index += 1;
+                }
+                GameEvent::Use { thing_id } => {
+                    if let Some(output) = self.run_thing_callback(&thing_id, ThingCallback::Use)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::UseWith { item_id, target_id } => {
+                    if let Some(output) = self.run_use_with_callback(&item_id, &target_id)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Read { thing_id } => {
+                    if let Some(output) = self.run_thing_callback(&thing_id, ThingCallback::Read)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Open { thing_id } => {
+                    if let Some(output) = self.run_thing_callback(&thing_id, ThingCallback::Open)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Close { thing_id } => {
+                    if let Some(output) =
+                        self.run_thing_callback(&thing_id, ThingCallback::Close)?
+                    {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Lock { thing_id } => {
+                    if let Some(output) = self.run_thing_callback(&thing_id, ThingCallback::Lock)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Unlock { thing_id } => {
+                    if let Some(output) =
+                        self.run_thing_callback(&thing_id, ThingCallback::Unlock)?
+                    {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Talk { thing_id } => {
+                    if let Some(output) = self.run_thing_callback(&thing_id, ThingCallback::Talk)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Ask { thing_id, topic } => {
+                    if let Some(output) = self.run_ask_callback(&thing_id, &topic)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Tell { thing_id, topic } => {
+                    if let Some(output) = self.run_tell_callback(&thing_id, &topic)? {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Show { thing_id, item_id } => {
+                    if let Some(output) =
+                        self.run_item_callback(&thing_id, &item_id, ItemCallback::Show)?
+                    {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::Give { thing_id, item_id } => {
+                    if let Some(output) =
+                        self.run_item_callback(&thing_id, &item_id, ItemCallback::Give)?
+                    {
+                        outcome.output = output;
+                    }
+                }
+                GameEvent::CustomVerb { verb_id, input } => {
+                    outcome.output = self
+                        .run_verb_callback(&verb_id, &input)?
+                        .unwrap_or_else(|| "Nothing happens.".to_string());
+                }
+                GameEvent::Timer { event_name } => {
+                    if let Some(output) = self.run_event_callback(&event_name)? {
+                        outcome.output = append_output(std::mem::take(&mut outcome.output), output);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn remember_successful_command(&mut self, snapshot: GameSnapshot, command: String) {
+        self.undo_stack.push(snapshot);
 
         if self.undo_stack.len() > Self::UNDO_LIMIT {
             self.undo_stack.remove(0);
@@ -1505,10 +1523,17 @@ impl LuaGame {
                     }
                 }
                 ScriptCommand::Schedule(turns, event_name) => {
-                    self.game.schedule_event(turns, event_name);
+                    self.game.schedule_event(
+                        turns.saturating_add(u64::from(self.turn_pending)),
+                        event_name,
+                    );
                 }
                 ScriptCommand::ScheduleScene(turns, event_name, scene) => {
-                    self.game.schedule_scene_event(turns, event_name, scene);
+                    self.game.schedule_scene_event(
+                        turns.saturating_add(u64::from(self.turn_pending)),
+                        event_name,
+                        scene,
+                    );
                 }
                 ScriptCommand::Cancel(event_name) => self.game.cancel_event(&event_name),
                 ScriptCommand::SetRandomState(random_state) => {
@@ -2747,6 +2772,217 @@ room "start" {
         assert_eq!(outcome.output, "The key is colder than it should be.");
         assert!(game.game.has("brass_key"));
         assert!(game.game.has_flag("touched_key"));
+    }
+
+    #[test]
+    fn intercepted_actions_commit_turns_and_participate_in_history() {
+        let game_file = std::env::temp_dir().join(format!(
+            "moonroom-intercept-transaction-test-{}.lua",
+            process::id()
+        ));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  title = "Intercept Transaction Test",
+  start = "start",
+
+  before_action = function(game, input)
+    if input == "knock" then
+      game.flag("knocked")
+      game.schedule(1, "bell")
+      game.say("The knock is intercepted.")
+    end
+  end,
+
+  after_action = function(game, input)
+    game.say("After " .. input .. " at turn " .. game.turn() .. ".")
+  end
+}
+
+room "start" { name = "Start", desc = "A test room." }
+
+event "bell" {
+  on_trigger = function(game)
+    game.say("Bell at turn " .. game.turn() .. ".")
+  end
+}
+"#,
+        )
+        .expect("transaction game should write");
+
+        let mut game = LuaGame::load(&game_file).expect("transaction game should load");
+        let CommandResult::Continue(outcome) = game
+            .handle_command("knock")
+            .expect("intercepted command should succeed")
+        else {
+            panic!("intercepted command should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "The knock is intercepted.\n\nAfter knock at turn 0."
+        );
+        assert_eq!(game.game.state().turn, 1);
+        assert!(game.game.has_flag("knocked"));
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("wait")
+            .expect("timer command should succeed")
+        else {
+            panic!("timer command should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "Time passes.\n\nAfter wait at turn 1.\n\nBell at turn 2."
+        );
+
+        game.handle_command("undo").expect("undo should succeed");
+        assert_eq!(game.game.state().turn, 1);
+
+        game.handle_command("undo")
+            .expect("second undo should succeed");
+        assert_eq!(game.game.state().turn, 0);
+        assert!(!game.game.has_flag("knocked"));
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("again")
+            .expect("again should repeat the most recently committed action")
+        else {
+            panic!("again should continue");
+        };
+        assert_eq!(outcome.output, "Time passes.\n\nAfter wait at turn 0.");
+        assert_eq!(game.game.state().turn, 1);
+        assert!(!game.game.has_flag("knocked"));
+
+        let _ = fs::remove_file(game_file);
+    }
+
+    #[test]
+    fn callback_errors_roll_back_core_and_lua_mutations() {
+        let game_file = std::env::temp_dir().join(format!(
+            "moonroom-callback-rollback-test-{}.lua",
+            process::id()
+        ));
+        fs::write(
+            &game_file,
+            r#"
+game {
+  title = "Callback Rollback Test",
+  start = "start",
+
+  after_action = function(game, input)
+    if input == "take coin" then
+      error("after action failed")
+    end
+  end
+}
+
+room "start" {
+  name = "Start",
+  desc = "A test room.",
+  exits = { north = "hall" }
+}
+
+room "hall" {
+  name = "Hall",
+  desc = "Another room.",
+  on_enter = function(game)
+    game.flag("entered_hall")
+    error("room callback failed")
+  end
+}
+
+thing "coin" {
+  name = "coin",
+  location = "start",
+  portable = true,
+  on_take = function(game)
+    game.flag("took_coin")
+    game.say("Taken in callback.")
+  end
+}
+"#,
+        )
+        .expect("rollback game should write");
+
+        let mut game = LuaGame::load(&game_file).expect("rollback game should load");
+        let error = game
+            .handle_command("take coin")
+            .expect_err("after action should fail");
+        assert!(error.to_string().contains("after action failed"));
+        assert_eq!(game.game.state().turn, 0);
+        assert!(!game.game.has("coin"));
+        assert!(!game.game.has_flag("took_coin"));
+
+        let error = game
+            .handle_command("north")
+            .expect_err("room callback should fail");
+        assert!(error.to_string().contains("room callback failed"));
+        assert_eq!(game.current_room_id(), "start");
+        assert_eq!(game.game.state().turn, 0);
+        assert!(!game.game.has_flag("entered_hall"));
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("undo")
+            .expect("failed commands should not create undo entries")
+        else {
+            panic!("undo should continue");
+        };
+        assert_eq!(outcome.output, "Nothing to undo.");
+
+        let CommandResult::Continue(outcome) = game
+            .handle_command("again")
+            .expect("failed commands should not replace last command")
+        else {
+            panic!("again should continue");
+        };
+        assert_eq!(outcome.output, "Nothing to do again.");
+
+        let _ = fs::remove_file(game_file);
+    }
+
+    #[test]
+    fn timer_callback_errors_restore_the_pending_timer_and_turn() {
+        let game_file = std::env::temp_dir().join(format!(
+            "moonroom-timer-rollback-test-{}.lua",
+            process::id()
+        ));
+        fs::write(
+            &game_file,
+            r#"
+game { title = "Timer Rollback Test", start = "start" }
+room "start" { name = "Start", desc = "A test room." }
+
+verb "arm" {
+  on_action = function(game)
+    game.schedule(1, "failure")
+    game.say("Armed.")
+  end
+}
+
+event "failure" {
+  on_trigger = function(game)
+    error("timer failed")
+  end
+}
+"#,
+        )
+        .expect("timer rollback game should write");
+
+        let mut game = LuaGame::load(&game_file).expect("timer rollback game should load");
+        game.handle_command("arm").expect("arming should succeed");
+        assert_eq!(game.game.state().turn, 1);
+        assert_eq!(game.game.state().timers.len(), 1);
+
+        let error = game
+            .handle_command("wait")
+            .expect_err("timer callback should fail");
+        assert!(error.to_string().contains("timer failed"));
+        assert_eq!(game.game.state().turn, 1);
+        assert_eq!(game.game.state().timers.len(), 1);
+        assert_eq!(game.game.state().timers[0].name, "failure");
+
+        let _ = fs::remove_file(game_file);
     }
 
     #[test]

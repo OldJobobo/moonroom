@@ -227,7 +227,6 @@ Moonroom is pre-release and changing quickly. The core design goal is stable, se
 
 Near-term roadmap priorities:
 
-- explicit turn, callback rollback, undo, and timer semantics
 - broader `moonroom check` diagnostics with better source context
 - richer object state such as scenery and light/dark rooms
 - parser ambiguity and disambiguation

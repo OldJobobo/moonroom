@@ -69,7 +69,11 @@ Available exits: east, north.
 
 `settings.exits.label` defaults to `"Available exits"` and can be customized.
 
-`before_action` and `after_action` are optional global hooks. Both receive the controlled `game` API and the normalized command text. If `before_action` calls `game.say`, that output is returned and the command is not handled by the core parser. `after_action` runs after the normal command pipeline and appends any output it says.
+`before_action` and `after_action` are optional global hooks. Both receive the controlled `game` API and the normalized command text. If `before_action` calls `game.say`, that output intercepts the command and the core parser is skipped. `after_action` still runs for an intercepted command.
+
+An advancing command, including one intercepted by `before_action`, consumes exactly one turn after `after_action` finishes. Due timer callbacks run afterward. During `before_action`, action-specific callbacks, and `after_action`, `game.turn()` returns the turn at the start of the command; timer callbacks observe the newly advanced turn.
+
+Commands are transactional over Rust-owned state. If any before, action-specific, room, after-action, scene/chapter, or timer callback fails, Moonroom restores the state from before the command. The failed command does not create an undo entry or replace the command repeated by `again`. `undo` restores all Rust-owned core and callback mutations from the last successful advancing command.
 
 `on_scene_start`, `on_scene_end`, and `on_chapter` are optional global hooks. They receive the controlled `game` API and the scene or chapter name after Rust-owned state changes.
 
@@ -424,7 +428,7 @@ game.schedule_scene(2, "lamp_flickers")
 game.cancel("house_settles")
 ```
 
-The first argument to `schedule` is the number of advancing turns before the event fires. Timers are saved as Rust-owned state.
+The first argument to `schedule` is the number of subsequent advancing turns before the event fires. Scheduling during an action does not count that same action as one of those turns. Timers are saved as Rust-owned state and fire after `after_action` for the command that makes them due.
 
 `game.schedule_scene(turns, event_name)` requires an active scene and schedules an event that only fires if that same scene is still active when the timer comes due. Ending a scene cancels timers scoped to that scene.
 
@@ -636,8 +640,10 @@ Build a standalone executable:
 moonroom build path/to/game --standalone -o dist/my-game
 ```
 
-The initial `.moon` format is a single JSON archive with `format = "moonroom.moon"`, `version = 1`, `entry = "game.lua"`, metadata copied from the Lua `game { ... }` table, and a virtual file table for the project files. Unpacking writes the virtual files back to a normal source folder, including a generated `moon.json` manifest.
+The initial `.moon` format is a JSON envelope with `format = "moonroom.moon"`, `version = 1`, `entry = "game.lua"`, metadata copied from the Lua `game { ... }` table, and a virtual file table containing hex-encoded project files. It is not a ZIP archive. Unpacking writes the virtual files back to a normal source folder, including a generated `moon.json` manifest.
 
 Lua files in packages use the same include rules as source folders: `include` paths are relative to the including Lua file, loaded once, checked for cycles, and cannot escape the packaged root.
 
 Packaging makes released code less casually readable than a folder of loose Lua files. It is not DRM; any local game package can be unpacked or reverse engineered.
+
+Moonroom games are executable Lua content, not passive documents. The current runtime does not enforce instruction, memory, or execution-time limits, so source projects and `.moon` packages should be run only when their authors are trusted. Packaging rejects symbolic links and prevents virtual paths and includes from escaping the game root, but those path protections are not a general-purpose sandbox.

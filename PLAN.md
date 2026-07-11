@@ -134,9 +134,7 @@ A typed intent model is optional future work. It becomes worthwhile when disambi
 
 ### Turn and callback pipeline
 
-The current implementation has grown across both `Game` and `LuaGame`: the global before hook runs before core parsing, core applies an action and advances time, Lua event callbacks run afterward, and the global after hook runs last. Intercepted before hooks and callback failures do not yet have a fully explicit transactional contract.
-
-The target contract is:
+The implemented contract is:
 
 ```text
 1. Normalize input and handle non-gameplay meta commands.
@@ -154,14 +152,14 @@ The target contract is:
 Required semantics:
 
 - A normal action advances at most one turn.
-- An intercepted normal action follows one documented turn policy; the preferred policy is that it still consumes the turn.
+- An intercepted normal action still consumes the turn and runs `after_action`.
 - Meta commands such as `look`, inventory, save/load, `again`, and `undo` follow explicit per-command rules.
 - Undo restores every Rust-owned mutation made by core or Lua callbacks.
 - Any callback error rolls the command back to its pre-command snapshot.
 - Timers observe the fully committed action state and fire after action callbacks.
 - `again` repeats the last successfully committed advancing command.
 
-This contract must be implemented before new callback phases or interaction modes are added.
+Scheduling during an action counts only subsequent advancing commands, not the action currently in progress. Action and global callbacks see the pre-advance turn; timer callbacks see the newly advanced turn.
 
 ### Save contract
 
@@ -383,31 +381,20 @@ Feature documentation is continuous and part of the quality contract. Dedicated 
 
 The DSL reference may be split by topic when navigation becomes a real problem; file splitting is not itself a product goal.
 
-### Milestone 17: Engine contract hardening — Next
+### Milestone 17: Engine contract hardening — Shipped
 
-This is the immediate implementation milestone because later callbacks, dialogue choices, and frontends depend on it.
-
-Work:
-
-1. Consolidate turn advancement and undo ownership across `Game` and `LuaGame`.
-2. Implement the target callback pipeline and transactional rollback.
-3. Add tests for intercepted actions, callback failures, timers, `again`, and undo.
-4. Document the final author-visible behavior in the DSL reference.
-5. Define and document the current Lua trust boundary before accepting third-party packages as safe content.
-
-Done when one component owns command transactions, every error path has deterministic state behavior, and the implementation matches the documented pipeline.
+Delivered explicit command transactions across core-only and Lua-backed play, complete Rust-state rollback on callback failure, post-action timer processing, consistent intercepted-action semantics, snapshot-based undo including parser reference state, and regression coverage for interception, room/action/after/timer failures, `again`, and `undo`. The DSL reference documents the final behavior and the current trusted-content boundary.
 
 ## Recommended Next Work
 
 Execute in this order:
 
-1. Milestone 17: turn, rollback, undo, and timer semantics.
-2. Broader `moonroom check` diagnostics and source context.
-3. Scenery things.
-4. Darkness and light sources.
-5. Parser ambiguity and disambiguation.
-6. Save atomicity, compatibility policy, and migration fixtures.
-7. Package resource limits and malformed-input hardening.
-8. Frontend-neutral session and structured output protocol.
+1. Broader `moonroom check` diagnostics and source context.
+2. Scenery things.
+3. Darkness and light sources.
+4. Parser ambiguity and disambiguation.
+5. Save atomicity, compatibility policy, and migration fixtures.
+6. Package resource limits and malformed-input hardening.
+7. Frontend-neutral session and structured output protocol.
 
 Do not start hot reload, `game.choice()`, TUI, browser, or WASM work until their required state-compatibility or frontend protocol contracts are in place.

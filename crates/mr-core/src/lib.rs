@@ -491,8 +491,14 @@ pub enum GameError {
 pub struct Game {
     world: World,
     state: GameState,
-    undo_stack: Vec<GameState>,
+    undo_stack: Vec<GameSnapshot>,
     last_command: Option<String>,
+    last_referenced_thing: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GameSnapshot {
+    state: GameState,
     last_referenced_thing: Option<String>,
 }
 
@@ -523,10 +529,21 @@ impl Game {
         Ok(())
     }
 
-    pub fn restore_state_for_undo(&mut self, mut state: GameState) -> Result<(), GameError> {
-        state.visited_rooms.insert(state.current_room.clone());
-        self.validate_state(&state)?;
-        self.state = state;
+    pub fn snapshot(&self) -> GameSnapshot {
+        GameSnapshot {
+            state: self.state.clone(),
+            last_referenced_thing: self.last_referenced_thing.clone(),
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, mut snapshot: GameSnapshot) -> Result<(), GameError> {
+        snapshot
+            .state
+            .visited_rooms
+            .insert(snapshot.state.current_room.clone());
+        self.validate_state(&snapshot.state)?;
+        self.state = snapshot.state;
+        self.last_referenced_thing = snapshot.last_referenced_thing;
         Ok(())
     }
 
@@ -544,8 +561,8 @@ impl Game {
         self.last_referenced_thing = None;
     }
 
-    fn push_undo_state(&mut self, state: GameState) {
-        self.undo_stack.push(state);
+    fn push_undo_state(&mut self, snapshot: GameSnapshot) {
+        self.undo_stack.push(snapshot);
 
         if self.undo_stack.len() > Self::UNDO_LIMIT {
             self.undo_stack.remove(0);
@@ -941,20 +958,47 @@ impl Game {
         }
 
         if normalized == "undo" {
-            let Some(state) = self.undo_stack.pop() else {
+            let Some(snapshot) = self.undo_stack.pop() else {
                 return Ok(CommandResult::Continue(CommandOutcome::new(
                     "Nothing to undo.",
                 )));
             };
 
-            self.restore_state_for_undo(state)?;
+            self.restore_snapshot(snapshot)?;
             return Ok(CommandResult::Continue(CommandOutcome::new("Undone.")));
         }
 
+        let verb = normalized.split_whitespace().next().unwrap_or_default();
+        let advances_turn = command_advances_turn(verb);
+        let pre_command_snapshot = self.snapshot();
+        let result = match self.execute_normalized_command(&normalized) {
+            Ok(result) => result,
+            Err(error) => {
+                self.restore_snapshot(pre_command_snapshot)?;
+                return Err(error);
+            }
+        };
+
+        let CommandResult::Continue(mut outcome) = result else {
+            return Ok(result);
+        };
+
+        if advances_turn {
+            self.push_undo_state(pre_command_snapshot);
+            self.remember_command(normalized);
+            outcome.events.extend(self.advance_turn());
+        }
+
+        Ok(CommandResult::Continue(outcome))
+    }
+
+    pub fn execute_normalized_command(
+        &mut self,
+        normalized: &str,
+    ) -> Result<CommandResult, GameError> {
         let mut parts = normalized.split_whitespace();
         let verb = parts.next().unwrap_or_default();
         let rest = parts.collect::<Vec<_>>().join(" ");
-        let pre_command_state = self.state.clone();
 
         let outcome = match verb {
             "look" | "l" if rest.is_empty() => CommandOutcome {
@@ -993,19 +1037,14 @@ impl Game {
             _ => self.fallback_command(verb, &rest)?,
         };
 
-        let advances_turn = command_advances_turn(verb);
-        let mut outcome = outcome;
-
-        if advances_turn {
-            self.push_undo_state(pre_command_state);
-            self.remember_command(normalized);
-            self.state.turn += 1;
-            outcome.events.extend(self.due_timer_events());
-        }
-
         self.remember_referenced_things(&outcome.events);
 
         Ok(CommandResult::Continue(outcome))
+    }
+
+    pub fn advance_turn(&mut self) -> Vec<GameEvent> {
+        self.state.turn = self.state.turn.saturating_add(1);
+        self.due_timer_events()
     }
 
     pub fn look(&self) -> Result<String, GameError> {

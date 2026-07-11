@@ -22,10 +22,10 @@ You take the linen coat.
 > polish key
 You polish the key with the cuff of the linen coat until brass shows through the dark.
 
+Rain moves across the glass in a pattern almost like handwriting.
+
 > unlock box
 The polished key turns once in the wooden box. The lock gives up with a small domestic click.
-
-Rain moves across the glass in a pattern almost like handwriting.
 !flag wooden_box_unlocked
 
 > open box

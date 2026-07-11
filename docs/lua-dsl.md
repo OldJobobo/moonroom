@@ -535,7 +535,7 @@ save --compact slot.json
 save -c slot.json
 ```
 
-Legacy raw `GameState` JSON saves from earlier Moonroom builds still load and are treated as format-version 0 migrations into the current state model.
+Moonroom writes saves atomically: it writes and syncs a temporary file beside the destination, then renames it into place, so a failed write leaves the last completed save intact. Save input is limited to 4 MiB. Legacy raw `GameState` JSON saves from earlier Moonroom builds still load and are treated as format-version 0 migrations into the current state model. Versioned envelope format `1` is the only supported envelope version; unknown future versions are rejected rather than guessed. In 0.1, save compatibility is determined by the game compatibility id (`game.id`, or the title when omitted); game version metadata is recorded for authors but does not itself permit or reject a load. Authors who make an incompatible state change must publish it as a new compatibility id until an explicit migration system exists.
 
 ## Transcript Tests
 
@@ -640,7 +640,7 @@ Build a standalone executable:
 moonroom build path/to/game --standalone -o dist/my-game
 ```
 
-The initial `.moon` format is a JSON envelope with `format = "moonroom.moon"`, `version = 1`, `entry = "game.lua"`, metadata copied from the Lua `game { ... }` table, and a virtual file table containing hex-encoded project files. It is not a ZIP archive. Unpacking writes the virtual files back to a normal source folder, including a generated `moon.json` manifest.
+The initial `.moon` format is a JSON envelope with `format = "moonroom.moon"`, `version = 1`, `entry = "game.lua"`, metadata copied from the Lua `game { ... }` table, and a virtual file table containing hex-encoded project files. It is not a ZIP archive. Unpacking writes the virtual files back to a normal source folder, including a generated `moon.json` manifest. Moonroom rejects packages larger than 16 MiB, with more than 1,024 files, files larger than 8 MiB, decoded contents larger than 32 MiB, paths longer than 240 bytes or deeper than 16 components, duplicate virtual paths, malformed hex, and paths that escape the virtual root.
 
 Lua files in packages use the same include rules as source folders: `include` paths are relative to the including Lua file, loaded once, checked for cycles, and cannot escape the packaged root.
 

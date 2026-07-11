@@ -296,7 +296,7 @@ Exit criteria:
 
 Delivered in the 0.1 line: reachable object matching is deterministic. When a command matches more than one visible, reachable object, Moonroom lists the candidates and requires a more specific name; it does not pick by definition order. Inaccessible objects report closed-container or reachability context without exposing hidden objects. Core, Lua-backed, and transcript tests cover the behavior.
 
-### Phase 3: Save and package safety (Next)
+### Phase 3: Save and package safety (Shipped)
 
 Goal: ordinary corruption or oversized input fails safely, and 0.1 defines what it will preserve.
 
@@ -313,7 +313,9 @@ Exit criteria:
 - Unsupported or corrupt inputs produce bounded, actionable errors.
 - Compatibility promises are documented before the first tagged release.
 
-### Phase 4: Author documentation
+Delivered in the 0.1 line: saves write atomically through a synced sibling temporary file and rename. Raw legacy state remains the supported format-0 migration, versioned save envelope 1 is the current compatible format, and compatibility is keyed by game id while game version remains author metadata. Save and package readers reject bounded corrupt input; package limits cover input size, file count, decoded totals, individual file size, path length/depth, duplicate paths, malformed hex, and traversal. Lua remains trusted executable content; these limits are robustness measures, not a sandbox.
+
+### Phase 4: Author documentation (Next)
 
 Goal: a new author can build and test a small game without reconstructing behavior from examples.
 

@@ -229,5 +229,4 @@ Moonroom is pre-release and changing quickly. The core design goal is stable, se
 Near-term roadmap priorities:
 
 - richer object state such as scenery and light/dark rooms
-- save and package hardening
 - first-game and packaging documentation

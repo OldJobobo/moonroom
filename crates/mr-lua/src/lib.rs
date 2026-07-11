@@ -12,6 +12,7 @@ use mr_core::{
     GameError, GameEvent, GameMetadata, GameSettings, GameSnapshot, GameState, Room, Thing,
     ThingKind, World, WorldValidationSeverity, random_bounded,
 };
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +62,9 @@ pub enum LuaRunError {
         source: serde_json::Error,
     },
 
+    #[error("invalid save file '{path}': {message}")]
+    InvalidSave { path: PathBuf, message: String },
+
     #[error("unsupported save format version {version} in '{path}'")]
     UnsupportedSaveVersion { path: PathBuf, version: u32 },
 
@@ -89,6 +93,13 @@ pub enum LuaRunError {
 
 const SAVE_FORMAT: &str = "moonroom.save";
 const SAVE_FORMAT_VERSION: u32 = 1;
+const MAX_SAVE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PACKAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PACKAGE_FILES: usize = 1_024;
+const MAX_PACKAGE_FILE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PACKAGE_DECODED_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PACKAGE_PATH_BYTES: usize = 240;
+const MAX_PACKAGE_PATH_COMPONENTS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveOutputMode {
@@ -146,6 +157,7 @@ struct MoonPackage {
     title: Option<String>,
     #[serde(default)]
     author: Option<String>,
+    #[serde(deserialize_with = "deserialize_unique_file_map")]
     files: BTreeMap<String, String>,
 }
 
@@ -514,7 +526,7 @@ impl LuaGame {
             source,
         })?;
 
-        fs::write(path, json).map_err(|source| LuaRunError::WriteSave {
+        atomic_write(path, json.as_bytes()).map_err(|source| LuaRunError::WriteSave {
             path: path.to_path_buf(),
             source,
         })
@@ -607,9 +619,19 @@ impl LuaGame {
 
     pub fn load_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), LuaRunError> {
         let path = path.as_ref();
-        let json = fs::read_to_string(path).map_err(|source| LuaRunError::ReadSave {
+        let bytes = fs::read(path).map_err(|source| LuaRunError::ReadSave {
             path: path.to_path_buf(),
             source,
+        })?;
+        if bytes.len() > MAX_SAVE_BYTES {
+            return Err(LuaRunError::InvalidSave {
+                path: path.to_path_buf(),
+                message: format!("save exceeds the {} byte limit", MAX_SAVE_BYTES),
+            });
+        }
+        let json = String::from_utf8(bytes).map_err(|_| LuaRunError::InvalidSave {
+            path: path.to_path_buf(),
+            message: "save is not valid UTF-8 JSON".to_string(),
         })?;
         let state = self.state_from_save_json(path, &json)?;
 
@@ -1733,6 +1755,20 @@ pub fn pack_game_directory_to_bytes(game_dir: impl AsRef<Path>) -> Result<Vec<u8
 
     collect_package_files(&root, &root, &mut files)?;
 
+    let decoded_bytes = files
+        .values()
+        .map(|contents| contents.len() / 2)
+        .sum::<usize>();
+    if decoded_bytes > MAX_PACKAGE_DECODED_BYTES {
+        return Err(LuaLoadError::InvalidPackage {
+            path: game_dir.to_path_buf(),
+            message: format!(
+                "package decoded contents exceed the {} byte limit",
+                MAX_PACKAGE_DECODED_BYTES
+            ),
+        });
+    }
+
     if !files.contains_key("game.lua") {
         return Err(LuaLoadError::InvalidPackage {
             path: game_dir.to_path_buf(),
@@ -1765,10 +1801,18 @@ pub fn pack_game_directory_to_bytes(game_dir: impl AsRef<Path>) -> Result<Vec<u8
         files,
     };
 
-    serde_json::to_vec_pretty(&package).map_err(|source| LuaLoadError::ParsePackage {
-        path: game_dir.to_path_buf(),
-        source,
-    })
+    let bytes =
+        serde_json::to_vec_pretty(&package).map_err(|source| LuaLoadError::ParsePackage {
+            path: game_dir.to_path_buf(),
+            source,
+        })?;
+    if bytes.len() > MAX_PACKAGE_BYTES {
+        return Err(LuaLoadError::InvalidPackage {
+            path: game_dir.to_path_buf(),
+            message: format!("package exceeds the {} byte limit", MAX_PACKAGE_BYTES),
+        });
+    }
+    Ok(bytes)
 }
 
 pub fn unpack_game_package(
@@ -1908,6 +1952,22 @@ fn collect_package_files(
                 source,
             })?;
 
+            if bytes.len() > MAX_PACKAGE_FILE_BYTES {
+                return Err(LuaLoadError::InvalidPackage {
+                    path: path.clone(),
+                    message: format!(
+                        "package file exceeds the {} byte limit",
+                        MAX_PACKAGE_FILE_BYTES
+                    ),
+                });
+            }
+            if files.len() >= MAX_PACKAGE_FILES {
+                return Err(LuaLoadError::InvalidPackage {
+                    path: root.to_path_buf(),
+                    message: format!("package exceeds the {} file limit", MAX_PACKAGE_FILES),
+                });
+            }
+
             files.insert(package_path_key(&relative), hex_encode(&bytes));
         }
     }
@@ -1926,6 +1986,12 @@ fn read_moon_package(path: impl AsRef<Path>) -> Result<LoadedPackage, LuaLoadErr
 }
 
 fn decode_moon_package(path: &Path, bytes: &[u8]) -> Result<LoadedPackage, LuaLoadError> {
+    if bytes.len() > MAX_PACKAGE_BYTES {
+        return Err(LuaLoadError::InvalidPackage {
+            path: path.to_path_buf(),
+            message: format!("package exceeds the {} byte limit", MAX_PACKAGE_BYTES),
+        });
+    }
     let package: MoonPackage =
         serde_json::from_slice(bytes).map_err(|source| LuaLoadError::ParsePackage {
             path: path.to_path_buf(),
@@ -1951,7 +2017,15 @@ fn decode_moon_package(path: &Path, bytes: &[u8]) -> Result<LoadedPackage, LuaLo
             path: path.to_path_buf(),
             message,
         })?;
+    if package.files.len() > MAX_PACKAGE_FILES {
+        return Err(LuaLoadError::InvalidPackage {
+            path: path.to_path_buf(),
+            message: format!("package exceeds the {} file limit", MAX_PACKAGE_FILES),
+        });
+    }
+
     let mut files = BTreeMap::new();
+    let mut decoded_bytes = 0_usize;
 
     for (file_path, encoded) in package.files {
         let file_path =
@@ -1963,6 +2037,33 @@ fn decode_moon_package(path: &Path, bytes: &[u8]) -> Result<LoadedPackage, LuaLo
             path: path.to_path_buf(),
             message,
         })?;
+
+        if bytes.len() > MAX_PACKAGE_FILE_BYTES {
+            return Err(LuaLoadError::InvalidPackage {
+                path: path.to_path_buf(),
+                message: format!(
+                    "package file '{}' exceeds the {} byte limit",
+                    file_path.display(),
+                    MAX_PACKAGE_FILE_BYTES
+                ),
+            });
+        }
+        decoded_bytes =
+            decoded_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| LuaLoadError::InvalidPackage {
+                    path: path.to_path_buf(),
+                    message: "package decoded size overflowed".to_string(),
+                })?;
+        if decoded_bytes > MAX_PACKAGE_DECODED_BYTES {
+            return Err(LuaLoadError::InvalidPackage {
+                path: path.to_path_buf(),
+                message: format!(
+                    "package decoded contents exceed the {} byte limit",
+                    MAX_PACKAGE_DECODED_BYTES
+                ),
+            });
+        }
 
         files.insert(package_path_key(&file_path), bytes);
     }
@@ -2510,6 +2611,20 @@ fn normalize_package_path(path: impl AsRef<Path>) -> Result<PathBuf, String> {
         return Err("package paths must not be empty".to_string());
     }
 
+    if package_path_key(&normalized).len() > MAX_PACKAGE_PATH_BYTES {
+        return Err(format!(
+            "package path '{}' exceeds the {MAX_PACKAGE_PATH_BYTES} byte limit",
+            path.display()
+        ));
+    }
+
+    if normalized.components().count() > MAX_PACKAGE_PATH_COMPONENTS {
+        return Err(format!(
+            "package path '{}' exceeds the {MAX_PACKAGE_PATH_COMPONENTS} component limit",
+            path.display()
+        ));
+    }
+
     Ok(normalized)
 }
 
@@ -2518,6 +2633,65 @@ fn package_path_key(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("save.json"));
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn deserialize_unique_file_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueFileMapVisitor;
+
+    impl<'de> Visitor<'de> for UniqueFileMapVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of unique package paths to hex-encoded files")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut files = BTreeMap::new();
+            while let Some((path, contents)) = map.next_entry::<String, String>()? {
+                if files.insert(path.clone(), contents).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate package path '{path}'"
+                    )));
+                }
+            }
+            Ok(files)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueFileMapVisitor)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -3849,6 +4023,82 @@ thing "coin" {
             .expect_err("wrong game save should fail");
 
         assert!(err.to_string().contains("belongs to game 'first'"));
+    }
+
+    #[test]
+    fn save_loading_rejects_truncated_and_oversized_inputs() {
+        let game_file =
+            std::env::temp_dir().join(format!("moonroom-save-limits-test-{}.lua", process::id()));
+        let truncated_file = game_file.with_extension("truncated.json");
+        let oversized_file = game_file.with_extension("oversized.json");
+        fs::write(&game_file, SAVE_ID_TEST_GAME.replace("GAME_ID", "limits"))
+            .expect("game should write");
+        fs::write(&truncated_file, r#"{"format":"moonroom.save""#)
+            .expect("truncated save should write");
+        fs::write(&oversized_file, vec![b' '; MAX_SAVE_BYTES + 1])
+            .expect("oversized save should write");
+        let mut game = LuaGame::load(&game_file).expect("game should load");
+
+        assert!(
+            game.load_from_path(&truncated_file)
+                .expect_err("truncated save should fail")
+                .to_string()
+                .contains("failed to parse save")
+        );
+        assert!(
+            game.load_from_path(&oversized_file)
+                .expect_err("oversized save should fail")
+                .to_string()
+                .contains("exceeds the")
+        );
+
+        for path in [&game_file, &truncated_file, &oversized_file] {
+            fs::remove_file(path).expect("test file should be removed");
+        }
+    }
+
+    #[test]
+    fn failed_atomic_write_preserves_the_destination() {
+        let destination = std::env::temp_dir().join(format!(
+            "moonroom-atomic-save-destination-{}",
+            process::id()
+        ));
+        fs::create_dir_all(&destination).expect("destination directory should exist");
+
+        atomic_write(&destination, b"new save").expect_err("writing over a directory must fail");
+
+        assert!(destination.is_dir());
+        let temporary = destination.parent().expect("temp parent").join(format!(
+            ".{}.{}.tmp",
+            destination
+                .file_name()
+                .expect("destination name")
+                .to_string_lossy(),
+            process::id()
+        ));
+        assert!(!temporary.exists());
+
+        fs::remove_dir_all(destination).expect("destination directory should be removed");
+    }
+
+    #[test]
+    fn package_decoder_rejects_duplicate_and_traversal_paths() {
+        let path = Path::new("broken.moon");
+        let duplicate = br#"{"format":"moonroom.moon","version":1,"entry":"game.lua","files":{"game.lua":"","game.lua":""}}"#;
+        let traversal = br#"{"format":"moonroom.moon","version":1,"entry":"../game.lua","files":{"game.lua":""}}"#;
+
+        assert!(
+            decode_moon_package(path, duplicate)
+                .expect_err("duplicate paths should fail")
+                .to_string()
+                .contains("duplicate package path")
+        );
+        assert!(
+            decode_moon_package(path, traversal)
+                .expect_err("traversal should fail")
+                .to_string()
+                .contains("escapes the root")
+        );
     }
 
     #[test]

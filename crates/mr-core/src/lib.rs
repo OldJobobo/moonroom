@@ -1117,7 +1117,7 @@ impl Game {
         }
 
         let Some(thing) = self.find_accessible_thing(query) else {
-            return "You don't see that here.".to_string();
+            return self.object_resolution_error(query, false);
         };
 
         let mut output = thing
@@ -1151,7 +1151,7 @@ impl Game {
 
         let source_id = if let Some(source) = source {
             let Some(source_id) = self.find_accessible_thing_id(source) else {
-                return CommandOutcome::new("You don't see that here.");
+                return CommandOutcome::new(self.object_resolution_error(source, false));
             };
 
             if self.is_closed_container(&source_id) {
@@ -1169,7 +1169,7 @@ impl Game {
         };
 
         let Some(id) = self.find_reachable_thing_id(query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(query, false));
         };
 
         if let Some(source_id) = source_id
@@ -1253,11 +1253,11 @@ impl Game {
         };
 
         let Some(item_id) = self.find_inventory_thing_id(item_query) else {
-            return CommandOutcome::new("You aren't carrying that.");
+            return CommandOutcome::new(self.object_resolution_error(item_query, true));
         };
 
         let Some(target_id) = self.find_accessible_thing_id(target_query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(target_query, false));
         };
 
         if item_id == target_id {
@@ -1327,7 +1327,7 @@ impl Game {
         }
 
         let Some(id) = self.find_inventory_thing_id(query) else {
-            return CommandOutcome::new("You aren't carrying that.");
+            return CommandOutcome::new(self.object_resolution_error(query, true));
         };
 
         let thing = self
@@ -1397,11 +1397,11 @@ impl Game {
 
         if let Some((item_query, target_query)) = split_use_target(query) {
             let Some(item_id) = self.find_accessible_thing_id(item_query) else {
-                return CommandOutcome::new("You don't see that here.");
+                return CommandOutcome::new(self.object_resolution_error(item_query, false));
             };
 
             let Some(target_id) = self.find_accessible_thing_id(target_query) else {
-                return CommandOutcome::new("You don't see that here.");
+                return CommandOutcome::new(self.object_resolution_error(target_query, false));
             };
 
             if item_id == target_id {
@@ -1415,7 +1415,7 @@ impl Game {
         }
 
         let Some(id) = self.find_accessible_thing_id(query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(query, false));
         };
 
         let thing = self
@@ -1436,7 +1436,7 @@ impl Game {
         }
 
         let Some(id) = self.find_accessible_thing_id(query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(query, false));
         };
 
         let thing = self
@@ -1460,7 +1460,7 @@ impl Game {
         }
 
         let Some(id) = self.find_accessible_thing_id(query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(query, false));
         };
 
         let thing = self
@@ -1496,7 +1496,7 @@ impl Game {
         }
 
         let Some(id) = self.find_accessible_thing_id(query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(query, false));
         };
 
         let thing = self
@@ -1530,7 +1530,7 @@ impl Game {
         let (target_query, key_query) = split_with_target(query);
 
         let Some(id) = self.find_accessible_thing_id(target_query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(target_query, false));
         };
 
         let thing = self
@@ -1573,7 +1573,7 @@ impl Game {
         let (target_query, key_query) = split_with_target(query);
 
         let Some(id) = self.find_accessible_thing_id(target_query) else {
-            return CommandOutcome::new("You don't see that here.");
+            return CommandOutcome::new(self.object_resolution_error(target_query, false));
         };
 
         let thing = self
@@ -1610,7 +1610,7 @@ impl Game {
         }
 
         let Some(id) = self.find_inventory_thing_id(query) else {
-            return CommandOutcome::new("You aren't carrying that.");
+            return CommandOutcome::new(self.object_resolution_error(query, true));
         };
 
         let thing = self
@@ -1636,7 +1636,7 @@ impl Game {
         }
 
         let Some(id) = self.find_inventory_thing_id(query) else {
-            return CommandOutcome::new("You aren't carrying that.");
+            return CommandOutcome::new(self.object_resolution_error(query, true));
         };
 
         let thing = self
@@ -1658,7 +1658,7 @@ impl Game {
         };
 
         let Some(id) = self.find_reachable_thing_id(query) else {
-            return CommandOutcome::new("You don't see them here.");
+            return CommandOutcome::new(self.object_resolution_error(query, false));
         };
 
         let thing = self
@@ -1736,7 +1736,7 @@ impl Game {
         };
 
         let Some(item_id) = self.find_inventory_thing_id(item_query) else {
-            return CommandOutcome::new("You aren't carrying that.");
+            return CommandOutcome::new(self.object_resolution_error(item_query, true));
         };
 
         let Some((actor_id, actor)) = self.find_actor(actor_query) else {
@@ -1768,7 +1768,7 @@ impl Game {
         };
 
         let Some(item_id) = self.find_inventory_thing_id(item_query) else {
-            return CommandOutcome::new("You aren't carrying that.");
+            return CommandOutcome::new(self.object_resolution_error(item_query, true));
         };
 
         let Some((actor_id, actor)) = self.find_actor(actor_query) else {
@@ -1999,18 +1999,8 @@ impl Game {
             return Some(id);
         }
 
-        self.find_reachable_thing_id(query).or_else(|| {
-            self.state
-                .inventory
-                .iter()
-                .filter(|id| self.visible(id))
-                .find(|id| {
-                    self.world
-                        .things
-                        .get(*id)
-                        .is_some_and(|thing| thing.matches(query))
-                })
-                .cloned()
+        self.unique_matching_thing_id(query, |id| {
+            self.thing_is_reachable(id) || self.state.inventory.contains(id)
         })
     }
 
@@ -2021,13 +2011,7 @@ impl Game {
             return Some(id);
         }
 
-        self.world
-            .things
-            .iter()
-            .find(|(id, thing)| {
-                !self.is_thing_hidden(id) && thing.matches(query) && self.thing_is_reachable(id)
-            })
-            .map(|(id, _)| id.clone())
+        self.unique_matching_thing_id(query, |id| self.thing_is_reachable(id))
     }
 
     fn find_inventory_thing_id(&self, query: &str) -> Option<String> {
@@ -2037,17 +2021,74 @@ impl Game {
             return Some(id);
         }
 
-        self.state
-            .inventory
+        self.unique_matching_thing_id(query, |id| self.state.inventory.contains(id))
+    }
+
+    fn unique_matching_thing_id(
+        &self,
+        query: &str,
+        available: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let matches = self
+            .world
+            .things
             .iter()
-            .filter(|id| self.visible(id))
-            .find(|id| {
-                self.world
-                    .things
-                    .get(*id)
-                    .is_some_and(|thing| thing.matches(query))
+            .filter(|(id, thing)| {
+                !self.is_thing_hidden(id) && thing.matches(query) && available(id)
             })
-            .cloned()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        (matches.len() == 1).then(|| matches[0].clone())
+    }
+
+    fn object_resolution_error(&self, query: &str, inventory_only: bool) -> String {
+        let matches = self
+            .world
+            .things
+            .iter()
+            .filter(|(id, thing)| {
+                !self.is_thing_hidden(id)
+                    && thing.matches(query)
+                    && if inventory_only {
+                        self.state.inventory.contains(*id)
+                    } else {
+                        self.thing_is_reachable(id) || self.state.inventory.contains(*id)
+                    }
+            })
+            .map(|(_, thing)| thing.name.clone())
+            .collect::<Vec<_>>();
+
+        if matches.len() > 1 {
+            return format!("Which {} do you mean: {}?", query, matches.join(" or "));
+        }
+
+        if !inventory_only
+            && let Some((_, thing)) = self.world.things.iter().find(|(id, thing)| {
+                !self.is_thing_hidden(id) && thing.matches(query) && !self.thing_is_reachable(id)
+            })
+        {
+            if let Some(container) = self.closed_container_ancestor(&thing.id) {
+                return format!("The {} is closed.", container.name);
+            }
+            return format!("You can't reach the {} from here.", thing.name);
+        }
+
+        if inventory_only {
+            "You aren't carrying that.".to_string()
+        } else {
+            "You don't see that here.".to_string()
+        }
+    }
+
+    fn closed_container_ancestor(&self, thing_id: &str) -> Option<&Thing> {
+        let mut current = self.state.thing_locations.get(thing_id)?.as_str();
+        while let Some(parent) = self.world.things.get(current) {
+            if self.is_closed_container(&parent.id) {
+                return Some(parent);
+            }
+            current = self.state.thing_locations.get(&parent.id)?.as_str();
+        }
+        None
     }
 
     fn resolve_pronoun_thing_id(&self, query: &str) -> Option<String> {
@@ -2099,7 +2140,7 @@ impl Game {
 
     fn actor_not_found_output(&self, query: &str) -> CommandOutcome {
         let Some(id) = self.find_reachable_thing_id(query) else {
-            return CommandOutcome::new("You don't see them here.");
+            return CommandOutcome::new(self.object_resolution_error(query, false));
         };
 
         let thing = self
@@ -2153,7 +2194,7 @@ impl Game {
         };
 
         let Some(target) = self.find_accessible_thing(target_query) else {
-            return "You don't see that here.".to_string();
+            return self.object_resolution_error(target_query, false);
         };
 
         match (&target.kind, preposition) {
@@ -2309,7 +2350,7 @@ impl Game {
 
     fn touch(&self, query: &str) -> String {
         let Some(thing) = self.find_accessible_thing(query) else {
-            return "You don't see that here.".to_string();
+            return self.object_resolution_error(query, false);
         };
 
         format!(
@@ -2889,6 +2930,51 @@ mod tests {
             panic!("talk should continue");
         };
         assert_eq!(outcome.output, "The caretaker has nothing to say.");
+    }
+
+    #[test]
+    fn requires_a_more_specific_name_for_ambiguous_reachable_objects() {
+        let mut world = test_world();
+        let mut iron_key = world.things.get("brass_key").expect("key").clone();
+        iron_key.id = "iron_key".to_string();
+        iron_key.name = "iron key".to_string();
+        iron_key.aliases = vec!["key".to_string(), "iron key".to_string()];
+        world.things.insert(iron_key.id.clone(), iron_key);
+        let mut game = Game::new(world).expect("valid world");
+
+        let CommandResult::Continue(outcome) = game.handle_command("take key").expect("take")
+        else {
+            panic!("take should continue");
+        };
+
+        assert_eq!(
+            outcome.output,
+            "Which key do you mean: brass key or iron key?"
+        );
+        assert!(!game.has("brass_key"));
+        assert!(!game.has("iron_key"));
+
+        let CommandResult::Continue(outcome) =
+            game.handle_command("take iron key").expect("specific take")
+        else {
+            panic!("take should continue");
+        };
+        assert_eq!(outcome.output, "You take the iron key.");
+    }
+
+    #[test]
+    fn object_matching_normalizes_case_articles_and_whitespace() {
+        let mut game = Game::new(test_world()).expect("valid world");
+
+        for query in ["KEY", "the   brass   key", "  a key  "] {
+            let CommandResult::Continue(outcome) = game
+                .handle_command(&format!("examine {query}"))
+                .expect("examine should run")
+            else {
+                panic!("examine should continue");
+            };
+            assert_eq!(outcome.output, "A key.");
+        }
     }
 
     #[test]

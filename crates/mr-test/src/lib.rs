@@ -769,6 +769,34 @@ A garden.
     }
 
     #[test]
+    fn transcript_tests_cover_deterministic_ambiguity() {
+        let project_dir = unique_temp_dir("moonroom-ambiguity-transcript-test");
+        let tests_dir = project_dir.join("tests");
+        fs::create_dir_all(&tests_dir).expect("test project should be created");
+        fs::write(
+            project_dir.join("game.lua"),
+            r#"game { title = "Ambiguity", start = "start" }
+room "start" { name = "Start", desc = "A room." }
+thing "brass_key" { name = "brass key", aliases = { "key" }, location = "start", portable = true }
+thing "iron_key" { name = "iron key", aliases = { "key" }, location = "start", portable = true }
+"#,
+        )
+        .expect("game should be written");
+        let transcript_path = tests_dir.join("ambiguity.transcript");
+        fs::write(
+            &transcript_path,
+            "> take key\nWhich key do you mean: brass key or iron key?\n\n> take iron key\nYou take the iron key.\n",
+        )
+        .expect("transcript should be written");
+
+        let failures =
+            run_transcript(&project_dir, &transcript_path).expect("transcript should run");
+        assert!(failures.is_empty());
+
+        fs::remove_dir_all(project_dir).expect("temporary project should be removed");
+    }
+
+    #[test]
     fn filters_transcripts_by_path_text() {
         let project_dir = unique_temp_dir("moonroom-filter-test");
         let tests_dir = project_dir.join("tests");

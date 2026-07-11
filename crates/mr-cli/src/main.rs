@@ -5,9 +5,9 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use mr_core::{CommandResult, ThingKind, WorldValidationReport};
+use mr_core::{CommandResult, ThingKind, WorldValidationSeverity};
 use mr_lua::{
-    GameSource, LuaGame, SaveOutputMode, load_game_source, pack_game_directory,
+    GameSource, LuaGame, ProjectDiagnostic, SaveOutputMode, check_game_source, pack_game_directory,
     pack_game_directory_to_bytes, unpack_game_package,
 };
 use rustyline::{DefaultEditor, error::ReadlineError};
@@ -148,10 +148,16 @@ fn main() -> anyhow::Result<()> {
             let report = check_project(&game_dir)?;
             print_check_report(&game_dir, &report);
 
-            if report.has_errors() {
+            if report
+                .iter()
+                .any(|issue| issue.severity == WorldValidationSeverity::Error)
+            {
                 anyhow::bail!(
                     "validation failed with {} error(s).",
-                    report.errors().count()
+                    report
+                        .iter()
+                        .filter(|issue| issue.severity == WorldValidationSeverity::Error)
+                        .count()
                 );
             }
         }
@@ -206,11 +212,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn check_project(game_dir: &Path) -> anyhow::Result<WorldValidationReport> {
-    let world = load_game_source(GameSource::from_path(game_dir))
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-
-    Ok(world.validate())
+fn check_project(game_dir: &Path) -> anyhow::Result<Vec<ProjectDiagnostic>> {
+    check_game_source(GameSource::from_path(game_dir)).map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 fn read_embedded_package() -> anyhow::Result<Option<Vec<u8>>> {
@@ -272,25 +275,40 @@ fn build_standalone(game_dir: &Path, output: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_check_report(game_dir: &Path, report: &WorldValidationReport) {
-    if report.issues.is_empty() {
+fn print_check_report(game_dir: &Path, report: &[ProjectDiagnostic]) {
+    if report.is_empty() {
         println!("{}: no issues found.", game_dir.display());
         return;
     }
 
-    for issue in report.errors() {
-        eprintln!("error: {}", issue.message);
+    for issue in report {
+        let severity = match issue.severity {
+            WorldValidationSeverity::Error => "error",
+            WorldValidationSeverity::Warning => "warning",
+        };
+        let location = issue
+            .path
+            .as_ref()
+            .map(|path| match issue.line {
+                Some(line) => format!("{}:{line}", path.display()),
+                None => path.display().to_string(),
+            })
+            .unwrap_or_else(|| game_dir.join("game.lua").display().to_string());
+        eprintln!("{location}: {severity}[{}]: {}", issue.code, issue.message);
+        eprintln!("  help: {}", issue.help);
     }
 
-    for issue in report.warnings() {
-        eprintln!("warning: {}", issue.message);
-    }
-
-    if !report.has_errors() {
+    if !report
+        .iter()
+        .any(|issue| issue.severity == WorldValidationSeverity::Error)
+    {
         println!(
             "{}: {} warning(s), no errors.",
             game_dir.display(),
-            report.warnings().count()
+            report
+                .iter()
+                .filter(|issue| issue.severity == WorldValidationSeverity::Warning)
+                .count()
         );
     }
 }
@@ -1049,25 +1067,29 @@ thing "medal" {
 
         let report = check_project(&project_dir).expect("check should run");
 
-        assert!(report.has_errors());
         assert!(
             report
-                .errors()
+                .iter()
+                .any(|issue| issue.severity == WorldValidationSeverity::Error)
+        );
+        assert!(
+            report
+                .iter()
                 .any(|issue| issue.message.contains("exit 'north' targets missing room"))
         );
-        assert!(report.errors().any(|issue| {
+        assert!(report.iter().any(|issue| {
             issue
                 .message
                 .contains("requires missing thing 'missing_key'")
         }));
-        assert!(report.errors().any(|issue| {
+        assert!(report.iter().any(|issue| {
             issue
                 .message
                 .contains("thing 'medal' starts in missing location")
         }));
         assert!(
             report
-                .warnings()
+                .iter()
                 .any(|issue| issue.message.contains("alias 'token' is shared"))
         );
 

@@ -10,7 +10,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 use mr_core::{
     ActorTopic, CommandOutcome, CommandResult, CustomVerb, Exit, ExitDisplaySettings, Game,
     GameError, GameEvent, GameMetadata, GameSettings, GameSnapshot, GameState, Room, Thing,
-    ThingKind, World, random_bounded,
+    ThingKind, World, WorldValidationSeverity, random_bounded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -174,6 +174,7 @@ struct LoadState {
     include_stack: Vec<PathBuf>,
     included_files: BTreeSet<PathBuf>,
     package_files: Option<Rc<BTreeMap<String, Vec<u8>>>>,
+    event_references: Vec<EventReference>,
 }
 
 #[derive(Debug, Default)]
@@ -208,6 +209,24 @@ pub struct LoadedGame {
     lua: Lua,
     world: World,
     callbacks: CallbackRegistry,
+    event_references: Vec<EventReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EventReference {
+    name: String,
+    path: PathBuf,
+    line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDiagnostic {
+    pub severity: WorldValidationSeverity,
+    pub code: &'static str,
+    pub message: String,
+    pub help: String,
+    pub path: Option<PathBuf>,
+    pub line: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +255,44 @@ pub fn load_game(path: impl AsRef<Path>) -> Result<World, LuaLoadError> {
 
 pub fn load_game_source(source: GameSource) -> Result<World, LuaLoadError> {
     Ok(load_game_data_from_source(source)?.world)
+}
+
+/// Statically validates a project without calling gameplay callbacks.
+pub fn check_game_source(source: GameSource) -> Result<Vec<ProjectDiagnostic>, LuaLoadError> {
+    let loaded = load_game_data_from_source(source)?;
+    let mut diagnostics = loaded
+        .world
+        .validate()
+        .issues
+        .into_iter()
+        .map(|issue| ProjectDiagnostic {
+            severity: issue.severity,
+            code: if issue.severity == WorldValidationSeverity::Error {
+                "world.invalid"
+            } else {
+                "world.ambiguous-name"
+            },
+            help: validation_help(&issue.message),
+            message: issue.message,
+            path: None,
+            line: None,
+        })
+        .collect::<Vec<_>>();
+
+    for reference in loaded.event_references {
+        if !loaded.callbacks.events.contains_key(&reference.name) {
+            diagnostics.push(ProjectDiagnostic {
+                severity: WorldValidationSeverity::Error,
+                code: "event.missing",
+                message: format!("timer references undefined event '{}'", reference.name),
+                help: "Define it with event \"...\" { on_trigger = function(game) ... end }, or correct the scheduled event name.".to_string(),
+                path: Some(reference.path),
+                line: Some(reference.line),
+            });
+        }
+    }
+
+    Ok(diagnostics)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1578,12 +1635,14 @@ fn load_game_data(path: impl AsRef<Path>) -> Result<LoadedGame, LuaLoadError> {
     let mut state = state.borrow_mut();
     let world = std::mem::take(&mut state.world);
     let callbacks = std::mem::take(&mut state.callbacks);
+    let event_references = std::mem::take(&mut state.event_references);
     drop(state);
 
     Ok(LoadedGame {
         lua,
         world,
         callbacks,
+        event_references,
     })
 }
 
@@ -1629,12 +1688,14 @@ fn load_game_data_from_package(
     let mut state = state.borrow_mut();
     let world = std::mem::take(&mut state.world);
     let callbacks = std::mem::take(&mut state.callbacks);
+    let event_references = std::mem::take(&mut state.event_references);
     drop(state);
 
     Ok(LoadedGame {
         lua,
         world,
         callbacks,
+        event_references,
     })
 }
 
@@ -2357,6 +2418,9 @@ fn load_lua_file(
             }
         };
 
+        let references = literal_event_references(&source, &path);
+        state.borrow_mut().event_references.extend(references);
+
         lua.load(&source)
             .set_name(path.display().to_string())
             .exec()
@@ -2368,6 +2432,44 @@ fn load_lua_file(
 
     state.borrow_mut().include_stack.pop();
     result
+}
+
+fn literal_event_references(source: &str, path: &Path) -> Vec<EventReference> {
+    source
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let call = ["game.schedule(", "game.schedule_scene(", "game.cancel("]
+                .iter()
+                .find_map(|prefix| line.find(prefix).map(|offset| (prefix, offset)))?;
+            let args = &line[call.1 + call.0.len()..];
+            let quoted = args.find('"').and_then(|start| {
+                let rest = &args[start + 1..];
+                rest.find('"').map(|end| &rest[..end])
+            })?;
+            Some(EventReference {
+                name: quoted.to_string(),
+                path: path.to_path_buf(),
+                line: index + 1,
+            })
+        })
+        .collect()
+}
+
+fn validation_help(message: &str) -> String {
+    if message.contains("targets missing room") || message.contains("start room") {
+        "Define the referenced room, or change this reference to an existing room id.".to_string()
+    } else if message.contains("missing thing") || message.contains("missing key") {
+        "Define the referenced thing, or correct the referenced thing id.".to_string()
+    } else if message.contains("shared") {
+        "Use a distinct name or alias so authors and players can identify one object unambiguously."
+            .to_string()
+    } else if message.contains("recursive containment") || message.contains("cannot contain itself")
+    {
+        "Change the initial locations so containers do not contain themselves directly or indirectly.".to_string()
+    } else {
+        "Correct the referenced definition so the world can be loaded consistently.".to_string()
+    }
 }
 
 fn ensure_path_in_root(root: &Path, path: &Path) -> Result<(), LuaLoadError> {
@@ -2591,6 +2693,65 @@ fn normalized_command(input: &str) -> String {
 mod tests {
     use super::*;
     use std::{fs, path::PathBuf, process};
+
+    #[test]
+    fn check_reports_missing_literal_timer_event_with_source_context() {
+        let project_dir =
+            std::env::temp_dir().join(format!("moonroom-check-event-test-{}", process::id()));
+        fs::create_dir_all(&project_dir).expect("test project should be created");
+        let path = project_dir.join("game.lua");
+        fs::write(
+            &path,
+            r#"game { title = "Check", start = "start" }
+room "start" { name = "Start", desc = "A room.", on_enter = function(game)
+  game.schedule(1, "missing_event")
+end }
+"#,
+        )
+        .expect("test game should be written");
+
+        let diagnostics = check_game_source(GameSource::Directory(project_dir.clone()))
+            .expect("check should load the project");
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "event.missing")
+            .expect("missing event diagnostic");
+
+        assert_eq!(diagnostic.path.as_deref(), Some(path.as_path()));
+        assert_eq!(diagnostic.line, Some(3));
+        assert!(diagnostic.help.contains("Define it with event"));
+
+        fs::remove_dir_all(project_dir).expect("test project should be removed");
+    }
+
+    #[test]
+    fn lua_games_require_a_specific_name_for_ambiguous_objects() {
+        let path = std::env::temp_dir().join(format!(
+            "moonroom-ambiguous-objects-test-{}.lua",
+            process::id()
+        ));
+        fs::write(
+            &path,
+            r#"game { title = "Ambiguity", start = "start" }
+room "start" { name = "Start", desc = "A room." }
+thing "brass_key" { name = "brass key", aliases = { "key" }, location = "start", portable = true }
+thing "iron_key" { name = "iron key", aliases = { "key" }, location = "start", portable = true }
+"#,
+        )
+        .expect("test game should be written");
+        let mut game = LuaGame::load(&path).expect("test game should load");
+
+        let CommandResult::Continue(outcome) = game.handle_command("take key").expect("take")
+        else {
+            panic!("take should continue");
+        };
+        assert_eq!(
+            outcome.output,
+            "Which key do you mean: brass key or iron key?"
+        );
+
+        fs::remove_file(path).expect("test game should be removed");
+    }
 
     const DIALOGUE_TEST_GAME: &str = r#"
 game {

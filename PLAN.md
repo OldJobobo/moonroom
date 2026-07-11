@@ -262,7 +262,7 @@ create a game -> author it -> check it -> test it -> package it -> play it
 
 The House Under Glass is the release-driving fixture. Work enters 0.1 only when it improves that workflow, closes a correctness or trust gap, or is needed to ship the showcase. Other ideas belong in `ROADMAP.md`.
 
-### Phase 1: Author feedback
+### Phase 1: Author feedback (Shipped)
 
 Goal: authors can correct common project mistakes without reading Rust or Lua stack traces.
 
@@ -277,7 +277,9 @@ Exit criteria:
 - Every supported diagnostic has a stable test and a corrective message.
 - The generated starter project passes with no warnings.
 
-### Phase 2: Parser correctness
+Delivered in the 0.1 line: `moonroom check` emits severity-labelled, stable-code diagnostics with corrective guidance; literal scheduled-event references are checked without running gameplay callbacks and report Lua file/line context. Invalid-world and missing-event fixtures cover the diagnostic paths, and the generated starter remains warning-free.
+
+### Phase 2: Parser correctness (Shipped)
 
 Goal: valid commands never resolve an ambiguous object arbitrarily.
 
@@ -292,7 +294,9 @@ Exit criteria:
 - Ambiguous input has deterministic, tested behavior in core, Lua-backed play, and transcripts.
 - Parser failures explain the relevant corrective action without revealing hidden objects.
 
-### Phase 3: Save and package safety
+Delivered in the 0.1 line: reachable object matching is deterministic. When a command matches more than one visible, reachable object, Moonroom lists the candidates and requires a more specific name; it does not pick by definition order. Inaccessible objects report closed-container or reachability context without exposing hidden objects. Core, Lua-backed, and transcript tests cover the behavior.
+
+### Phase 3: Save and package safety (Next)
 
 Goal: ordinary corruption or oversized input fails safely, and 0.1 defines what it will preserve.
 

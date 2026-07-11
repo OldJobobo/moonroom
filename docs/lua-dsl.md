@@ -359,7 +359,7 @@ undo
 
 `again` or `g` repeats the last advancing command. `undo` restores the Rust-owned game state from before the last advancing command, including state changed by Lua callbacks. The undo history is bounded and is not written into save files.
 
-After object-focused commands such as `take key`, the parser can resolve `it` or `them` to the most recently referenced thing.
+Object matching ignores one leading article and normalizes whitespace and case. If more than one reachable object matches a command, Moonroom does not choose one arbitrarily: it names the matching objects and asks for a more specific command, such as `take iron key`. After object-focused commands such as `take key`, the singular pronouns `it` and `them` resolve to the most recently referenced visible thing. Plural pronoun resolution is intentionally deferred.
 
 Lua authors can define `on_use_with = function(game, item_id, target_id) ... end` on the item to handle `use item on target` or `use item with target`.
 

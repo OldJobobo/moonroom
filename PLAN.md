@@ -1,762 +1,413 @@
 # Moonroom Plan
 
-Moonroom is an interactive fiction engine written in Rust, with game worlds defined in scriptable Lua.
+Moonroom is a Rust engine for parser-based interactive fiction with Lua-authored game worlds.
 
-Rust owns the engine, parser, state, saves, testing, packaging, and frontends. Lua owns world definition: rooms, things, verbs, dialogue, events, conditions, and scripted callbacks.
+Rust owns parsing, saveable state, action rules, testing, packaging, and frontends. Lua owns author definitions and scripted callbacks through a controlled `game` API. Lua runtime state is never the save format.
 
-## Naming
+This document is the product roadmap and architecture contract. `README.md` is the current quickstart and `docs/lua-dsl.md` is the author-facing DSL reference.
 
-Use `Moonroom` for the public project identity and `moonroom` for the user-facing command.
+## Status
 
-Use `mr-*` for internal Rust crates:
+Moonroom is pre-release but already usable from the command line.
+
+| Area | Status |
+| --- | --- |
+| Core parser-fiction loop | Shipped |
+| Lua DSL and callbacks | Shipped |
+| Rust-owned save/load | Shipped, compatibility work remains |
+| Transcript testing | Shipped |
+| Author inspection and validation | Shipped, diagnostics can grow |
+| `.moon` packages and standalone builds | Shipped, release hardening remains |
+| Advanced object state | In progress |
+| Parser disambiguation | Planned |
+| Frontend-neutral session protocol | Planned |
+| TUI and browser frontends | Later |
+
+Status terms in this plan mean:
+
+- **Shipped**: implemented, documented, and covered by tests.
+- **In progress**: a useful subset is shipped, but listed acceptance criteria remain.
+- **Planned**: intended next work with an agreed boundary.
+- **Later**: directional work that should not constrain near-term implementation yet.
+
+## Product Principles
+
+1. Authors should describe games in readable Lua rather than reimplementing the engine.
+2. Saveable gameplay state belongs to Rust: rooms, inventory, object state, flags, counters, timers, scenes, actor memory, RNG state, and turn count.
+3. Lua mutation must go through the controlled callback `game` API.
+4. Engine behavior should be deterministic under a known random seed.
+5. Transcript tests should remain readable story artifacts.
+6. The CLI is the canonical frontend until a stable frontend-neutral session protocol exists.
+7. Small games may use one `game.lua`; larger games may split definitions with project-local `include` files.
+8. Every new DSL feature must define validation, save behavior, undo behavior, tests, and documentation as part of its definition of done.
+
+## Current Stack and Workspace
+
+The settled stack is:
 
 ```text
-moonroom = product, command, docs, engine name
-mr-*     = internal workspace crates
+Rust 2024
+mlua with vendored Lua 5.4
+serde and serde_json
+clap
+rustyline
+anyhow and thiserror
 ```
 
-Example commands:
+Current crates:
+
+```text
+crates/mr-core   serializable world/state, parser actions, rules, and core events
+crates/mr-lua    Lua DSL loading, callback registry, game API, saves, and packages
+crates/mr-cli    play/test/check/inspect/transcript/pack/unpack/build/new commands
+crates/mr-test   transcript parser, assertions, runner, filtering, and update mode
+```
+
+Possible future crates should be created only when their boundary is proven:
+
+```text
+crates/mr-tui    richer terminal frontend
+crates/mr-save   save compatibility and migration logic, if mr-lua becomes crowded
+```
+
+## Current Capabilities
+
+Moonroom currently supports:
+
+- Rooms, exits, things, inventory, containers, supporters, wearables, hidden things, guarded exits, openable and lockable objects.
+- Movement, examination, manipulation, use-with actions, reading, wearing, dialogue actions, `again`, and bounded `undo`.
+- Actors, topic aliases and requirements, ask/tell/show/give callbacks, and Rust-owned actor memory.
+- Flags, counters, deterministic random numbers, visited rooms, timers, scenes, and chapters.
+- Global, room, thing, verb, topic, scene, chapter, and timer callbacks.
+- Project-local Lua includes with duplicate suppression, cycle rejection, and root containment.
+- Versioned JSON saves with game identity checks plus legacy raw-state loading.
+- Transcript assertions, filtering, deterministic seed overrides, and golden updates.
+- Static checks, project inspection, transcript recording, `.moon` packages, unpacking, and standalone executable output.
+
+The canonical commands are:
 
 ```bash
-moonroom play examples/house
-moonroom test examples/house
-moonroom new my-game
+moonroom play GAME
+moonroom test GAME [--filter TEXT] [--seed INTEGER] [--update]
+moonroom check GAME
+moonroom inspect GAME
+moonroom transcript GAME [-o FILE]
+moonroom pack DIRECTORY -o FILE.moon
+moonroom unpack FILE.moon -o DIRECTORY
+moonroom build DIRECTORY --standalone -o EXECUTABLE
+moonroom new DIRECTORY
 ```
 
-The short `mr` command can be added later as an alias, but the primary command should stay `moonroom` for discoverability.
+## Architecture Contracts
 
-## Core Goals
+### Ownership
 
-1. Let authors define games in readable Lua.
-2. Keep the Rust engine deterministic, testable, and save-friendly.
-3. Support classic parser fiction first: `look`, `go north`, `take key`, `use lamp`.
-4. Allow Lua scripting without giving Lua uncontrolled access to engine internals.
-5. Make games easy to test with transcript files.
-6. Keep the authoring model declarative by default, with imperative Lua callbacks only where they add value.
+`mr-core` must not depend on Lua. It owns the serializable model, parser actions, rules, turn state, and events that scripted behavior can observe.
 
-## Stack
+`mr-lua` owns Lua-specific definitions and callback execution. It may translate Lua tables into core definitions and apply queued `game` API commands, but it must not make Lua tables or closures part of `GameState`.
 
-Initial stack:
+Frontend crates must call an engine/session API. They must not duplicate parser rules or mutate state directly.
 
-```text
-Rust
-mlua
-serde
-serde_json or ron
-clap
-rustyline or reedline
-anyhow
-thiserror
-```
+### Game projects and includes
 
-Potential later additions:
-
-```text
-ratatui       -> richer terminal UI
-axum          -> browser frontend
-wasm          -> web export, if feasible
-```
-
-## Workspace Shape
-
-```text
-moonroom/
-  Cargo.toml
-  PLAN.md
-  README.md
-
-  crates/
-    mr-core/      -> world model, state, parser, actions
-    mr-lua/       -> mlua bindings and Lua DSL loading
-    mr-cli/       -> command-line frontend
-    mr-tui/       -> future terminal UI
-    mr-test/      -> transcript test runner
-    mr-save/      -> save/load format, if it grows beyond core
-
-  examples/
-    house/
-      game.lua
-      rooms.lua
-      things.lua
-      verbs.lua
-      tests/
-        opening.transcript
-```
-
-At first, `mr-save` can be folded into `mr-core`. Split it out only if persistence becomes large enough to justify its own crate.
-
-## Crate Responsibilities
-
-### `mr-core`
-
-Owns the engine rules and serializable game state.
-
-Responsibilities:
-
-```text
-world model
-rooms
-things
-actors
-inventory
-flags
-counters
-parser intent model
-action resolution
-turn pipeline
-output transcript buffer
-deterministic RNG hooks
-save-state structs
-```
-
-### `mr-lua`
-
-Owns the Lua runtime and authoring DSL.
-
-Responsibilities:
-
-```text
-load Lua files
-register rooms
-register things
-register verbs
-bind callbacks
-expose controlled game API to Lua
-convert Lua values into mr-core definitions
-report useful Lua source errors
-```
-
-### `mr-cli`
-
-Owns the playable command-line app.
-
-Responsibilities:
-
-```text
-moonroom play
-moonroom test
-moonroom new
-interactive prompt
-save/load commands
-basic project template generation
-```
-
-### `mr-tui`
-
-Future richer terminal frontend.
-
-Responsibilities:
-
-```text
-scrollback transcript
-status pane
-inventory pane
-command input
-theme support
-```
-
-### `mr-test`
-
-Owns transcript testing.
-
-Responsibilities:
-
-```text
-load transcript files
-run commands against the engine
-compare expected output
-support deterministic RNG
-report concise diffs
-```
-
-## Game Project Shape
-
-A Moonroom game should look like this:
+A typical source project is:
 
 ```text
 my-game/
   game.lua
   rooms.lua
   things.lua
-  verbs.lua
-  dialogue.lua
-  assets/
-  tests/
-    opening.transcript
-```
-
-Small games can keep everything in `game.lua`. Larger games can split definitions across files.
-
-## Lua Authoring Style
-
-Lua should feel like writing story data, not programming the whole engine.
-
-Use `game` as the callback argument name instead of `ctx`. It is friendlier for story authors and reads naturally.
-
-```lua
-game {
-  title = "The House Under Glass",
-  author = "Example Author",
-  start = "foyer"
-}
-
-room "foyer" {
-  name = "Foyer",
-  desc = "Rain needles the windows. A brass key rests on the table.",
-  exits = {
-    north = "hall"
-  }
-}
-
-room "hall" {
-  name = "Hall",
-  desc = function(game)
-    if game.has_flag("lamp_lit") then
-      return "The hall opens into a warm pool of lamp light."
-    end
-
-    return "The hall is narrow and unlit."
-  end
-}
-
-thing "brass_key" {
-  name = "brass key",
-  aliases = { "key", "brass key" },
-  location = "foyer",
-  portable = true,
-
-  on_take = function(game)
-    game.say("The key is colder than it should be.")
-    game.flag("touched_key")
-  end
-}
-```
-
-## Lua API
-
-Lua scripts should mutate the world only through a controlled engine API.
-
-Initial API:
-
-```lua
-game.say(text)
-game.flag(name)
-game.clear_flag(name)
-game.has_flag(name)
-game.counter(name)
-game.set_counter(name, value)
-game.inc_counter(name, amount)
-game.move(thing_id, location_id)
-game.goto(room_id)
-game.has(thing_id)
-game.room()
-game.turn()
-game.random(min, max)
-```
-
-Possible later API:
-
-```lua
-game.scene(name)
-game.schedule(turns, event_name)
-game.cancel(event_name)
-game.actor(actor_id)
-game.visible(thing_id)
-game.choice(options)
-```
-
-## Rust-Owned State
-
-The save file should serialize engine-owned state, not raw Lua state or the Lua stack.
-
-Save data should include:
-
-```text
-current room
-inventory
-object locations
-flags
-counters
-visited rooms
-turn count
-random seed
-active timers/events
-```
-
-This keeps saves stable across Lua reloads and makes transcript tests deterministic.
-
-## Turn Pipeline
-
-```text
-1. Read player input.
-2. Parse command into an intent.
-3. Resolve verb and targets.
-4. Run before-action hooks.
-5. Execute built-in or Lua action.
-6. Mutate world state.
-7. Run after-action hooks.
-8. Advance time and scheduled events.
-9. Print response.
-```
-
-## Parser Strategy
-
-Start simple. Do not build a natural-language parser too early.
-
-Phase 1 grammar:
-
-```text
-verb
-verb noun
-verb noun with noun
-direction aliases
-object aliases
-```
-
-Examples:
-
-```text
-look
-inventory
-take key
-x brass key
-go north
-n
-unlock door with brass key
-```
-
-Internal shape:
-
-```rust
-Intent {
-    verb: "unlock",
-    direct_object: Some("door"),
-    preposition: Some("with"),
-    indirect_object: Some("brass_key"),
-}
-```
-
-## MVP Features
-
-1. Load `game.lua`.
-2. Define rooms, exits, things, and inventory.
-3. Support built-in commands:
-
-```text
-look
-inventory / i
-go north / n
-take item
-drop item
-examine item / x item
-quit
-save
-load
-```
-
-4. Support Lua callbacks:
-
-```text
-on_enter
-on_look
-on_take
-on_drop
-on_use
-before_action
-after_action
-```
-
-5. Support JSON or RON save/load.
-6. Provide CLI runner:
-
-```bash
-moonroom play path/to/game
-```
-
-7. Provide transcript tests:
-
-```bash
-moonroom test path/to/game
-```
-
-## Milestones
-
-### Milestone 1: Core Prototype
-
-```text
-Rust CLI
-load Lua file
-register rooms and things
-move between rooms
-look, take, drop, inventory
-basic output buffer
-```
-
-Target:
-
-```bash
-moonroom play examples/house
-```
-
-Playable loop:
-
-```text
-Foyer
-
-Rain needles the windows. A brass key rests on the table.
-
-> take key
-The key is colder than it should be.
-
-> north
-Hall
-
-The hall is narrow and unlit.
-```
-
-### Milestone 2: Scripted World
-
-```text
-Lua callbacks
-flags and counters
-custom verbs
-conditional descriptions
-useful errors with Lua source locations
-```
-
-### Milestone 3: Persistence and Tests
-
-```text
-save/load
-transcript testing
-deterministic RNG
-golden output tests
-```
-
-### Milestone 4: Author Experience
-
-```text
-better error messages
-project template
-example game
-documentation
-hot reload during development
-```
-
-### Milestone 5: Richer IF Features
-
-```text
-containers
-supporters
-locked doors
-wearables
-actors and NPCs
-timed events
-dialogue trees
-scenes and chapters
-```
-
-## First Concrete Build Target
-
-Build the smallest real slice:
-
-```bash
-moonroom play examples/house
-```
-
-That should prove:
-
-```text
-Rust can load Lua-authored game data.
-The player can move through rooms.
-The player can inspect and manipulate things.
-Lua callbacks can produce output and mutate engine state.
-The engine state remains serializable.
-```
-
-Once that works, add transcript tests before making the parser more ambitious.
-
-## Expanded Roadmap
-
-The original milestone plan gets Moonroom to a playable, scriptable parser-fiction engine. The next phase should turn it into a stronger authoring platform: scalable project structure, better parser ergonomics, richer world state, safer save files, and tooling that helps authors understand their games before players do.
-
-### Milestone 6: Project Structure
-
-```text
-multi-file game loading from game.lua as the entrypoint
-project-local include helper for rooms.lua, things.lua, verbs.lua, dialogue.lua, and events.lua
-safe path handling so included files cannot escape the game directory
-clear Lua source errors that preserve the included file path
-cycle/duplicate include behavior defined explicitly
-moonroom new can keep generating one-file games, with split-file templates later
-```
-
-Target:
-
-```lua
--- game.lua
-game {
-  title = "The House Under Glass",
-  start = "foyer"
-}
-
-include "rooms.lua"
-include "things.lua"
-include "dialogue.lua"
-include "verbs.lua"
-include "events.lua"
-```
-
-Small games should still be able to keep everything in `game.lua`. Larger games should be able to split definitions across files without changing the runtime model.
-
-This milestone should happen before the showcase grows beyond its scaffold.
-
-### Milestone 7: Parser Quality
-
-```text
-again / g to repeat the last advancing command
-undo with bounded Rust-owned state history
-pronouns such as it / them after object references
-disambiguation when multiple visible objects match the same name
-common parser verbs: open, close, unlock, lock, read, give, show
-clearer parser failure messages tied to visible world state
-```
-
-Target:
-
-```text
-> take key
-You take the brass key.
-
-> x it
-The brass key is cold and slightly tarnished.
-
-> g
-You see nothing new about the brass key.
-
-> undo
-Undone.
-```
-
-### Milestone 8: Object State
-
-```text
-openable and closable containers
-lockable objects and exits
-hidden and revealed things
-light and dark room support
-edible and drinkable things
-fixed scenery objects that do not clutter room listings
-```
-
-Core state should remain serializable. Prefer explicit Rust-owned object state over ad hoc Lua globals for anything that must survive save/load.
-
-### Milestone 9: Dialogue System
-
-```text
-topic aliases: key, brass key, door key
-topic availability conditions
-tell actor about topic
-give item to actor
-show item to actor
-multi-step dialogue trees
-actor memory stored in Rust-owned state
-```
-
-The current `talk` and `ask actor about topic` model is enough for simple NPCs. This milestone should make conversation useful for puzzles and longer scenes without requiring each game to invent its own dialogue framework.
-
-### Milestone 10: Scenes and Chapters
-
-```text
-current scene/chapter in Rust-owned state
-game.scene()
-game.start_scene(name)
-game.end_scene(name)
-game.chapter(name)
-scene-scoped timers and hooks
-scene/chapter assertions in transcript tests
-```
-
-Scenes should be optional structure for authors, not a requirement for small games.
-
-### Milestone 11: Author Tooling
-
-```text
-moonroom check path/to/game
-static validation for missing rooms, exits, thing locations, and callbacks
-duplicate alias warnings
-invalid guarded-exit target checks
-moonroom inspect path/to/game for rooms, things, exits, verbs, events, and callbacks
-moonroom transcript path/to/game to record a play session into a transcript file
-better Lua load errors with DSL-specific context
-```
-
-This is likely the highest-leverage author experience milestone. As the DSL grows, mistakes should be caught before a player transcript stumbles into them.
-
-### Milestone 12: Save Format Hardening
-
-```text
-save format version
-game id and game version in save files
-reject saves from different games
-save migrations for older formats
-compact and pretty save output modes
-backward compatibility tests for representative old saves
-```
-
-The save format should be treated as a public contract once games start depending on it.
-
-### Milestone 13: Testing Improvements
-
-```text
-transcript directives: !contains, !not_contains, !room, !flag, !counter
-test filtering by transcript name
-golden transcript update mode
-random seed override for tests
-better diffs with command context
-fixture games for parser and state regressions
-```
-
-Transcript tests should remain readable story artifacts, but they need enough structure to verify state without forcing authors to expose everything through prose.
-
-### Milestone 14: Packaging and Distribution
-
-```text
-installable moonroom binary
-moonroom pack to package a game directory into a .moon file
-moonroom play/check/test support for both game directories and .moon packages
-single-file .moon game bundle format
-moonroom unpack for inspection, recovery, and tooling
-moonroom build --standalone to produce one executable with an embedded .moon package
-release profile checks
-example games as distribution fixtures
-documented game project versioning
-```
-
-This milestone should make it realistic to hand a Moonroom game to someone who is not working inside the repository.
-
-Moonroom should support three first-class game distribution forms:
-
-```text
-source folder      editable author format with Lua files on disk
-.moon package      portable single-file release bundle
-standalone binary  executable runner with an embedded .moon package
-```
-
-Target usage:
-
-```bash
-moonroom play my-game/
-moonroom pack my-game/ -o dist/my-game.moon
-moonroom play dist/my-game.moon
-moonroom check dist/my-game.moon
-moonroom test dist/my-game.moon
-moonroom unpack dist/my-game.moon -o unpacked-my-game
-moonroom build my-game/ --standalone -o dist/my-game
-```
-
-The folder format should remain the normal authoring experience. The `.moon` package should be the normal sharing format for players and reviewers. Standalone builds should be the most convenient player-facing export when the author wants to distribute one executable instead of requiring a separate Moonroom install.
-
-The implementation should introduce a small game-source abstraction so the Lua loader does not care whether `game.lua` and included files come from a directory, a `.moon` package, or embedded bytes:
-
-```rust
-enum GameSource {
-    Directory(PathBuf),
-    Package(PathBuf),
-    Embedded(&'static [u8]),
-}
-```
-
-The package should preserve Moonroom's existing project model by storing a project-local virtual filesystem. Includes should continue to use paths relative to the including Lua file and must not escape the packaged game root.
-
-Initial `.moon` package shape:
-
-```text
-my-game.moon
-  moon.json
-  game.lua
-  rooms.lua
-  things.lua
   dialogue.lua
   verbs.lua
+  events.lua
   assets/
   tests/
 ```
 
-Initial `moon.json` shape:
+`game.lua` is always the entrypoint. Includes resolve relative to the including file, remain inside the source or package root, load at most once, and reject cycles. Small games may define everything in `game.lua`.
 
-```json
-{
-  "format": "moonroom.moon",
-  "version": 1,
-  "entry": "game.lua",
-  "title": "The House Under Glass",
-  "author": "Example Author"
-}
-```
+### Parser
 
-Start with a simple archive-backed `.moon` format. Later release modes can strip/minify Lua or optionally store Lua bytecode to make distributed game code less casually readable. These modes should be treated as convenience and polish, not as strong DRM; any game that runs locally can be reverse engineered by a determined user.
+The current parser normalizes text and dispatches built-in verbs directly; it does not yet expose a general typed `Intent` object. Do not document a typed intent layer as existing.
 
-### Milestone 15: Frontends
+A typed intent model is optional future work. It becomes worthwhile when disambiguation, structured frontend output, or author hooks need resolved direct and indirect objects. If introduced, it belongs in `mr-core` and must replace rather than duplicate the existing dispatch path.
+
+### Turn and callback pipeline
+
+The current implementation has grown across both `Game` and `LuaGame`: the global before hook runs before core parsing, core applies an action and advances time, Lua event callbacks run afterward, and the global after hook runs last. Intercepted before hooks and callback failures do not yet have a fully explicit transactional contract.
+
+The target contract is:
 
 ```text
-keep CLI as the canonical frontend
-mr-tui with scrollback, status pane, inventory pane, and command input
-JSON event stream mode for external interfaces
-browser frontend using the same engine/state model
-possible wasm export if the Lua/runtime constraints are acceptable
+1. Normalize input and handle non-gameplay meta commands.
+2. Classify whether the command can advance a turn.
+3. Snapshot all Rust-owned state for rollback and undo.
+4. Run before_action with normalized raw input.
+5. If not intercepted, parse, resolve, and apply the core action.
+6. Run action-specific Lua callbacks and apply queued game API mutations.
+7. Run after_action.
+8. Advance the turn once and fire due timers.
+9. Commit the undo entry and last-command state.
+10. Return rendered output and structured events.
 ```
 
-New frontends should consume the same engine outputs rather than forking parser or world behavior.
+Required semantics:
 
-### Milestone 16: Documentation as Product
+- A normal action advances at most one turn.
+- An intercepted normal action follows one documented turn policy; the preferred policy is that it still consumes the turn.
+- Meta commands such as `look`, inventory, save/load, `again`, and `undo` follow explicit per-command rules.
+- Undo restores every Rust-owned mutation made by core or Lua callbacks.
+- Any callback error rolls the command back to its pre-command snapshot.
+- Timers observe the fully committed action state and fire after action callbacks.
+- `again` repeats the last successfully committed advancing command.
+
+This contract must be implemented before new callback phases or interaction modes are added.
+
+### Save contract
+
+Save files contain a versioned envelope, game identity metadata, and serialized `GameState`. They do not contain Lua runtime state or undo history.
+
+Current behavior:
+
+- Save format version is `1`.
+- The compatibility id is `game.id`, falling back to the title.
+- Saves for another game id are rejected.
+- Pretty and compact JSON are supported.
+- Legacy raw `GameState` JSON is accepted.
+- Game version metadata is recorded but does not currently drive compatibility.
+
+Before declaring save compatibility stable, Moonroom must define:
+
+- Engine save-version migration rules.
+- Game-version compatibility: warn, reject, or run an author migration.
+- Atomic writes using a temporary file and rename.
+- Recovery and diagnostics for truncated or corrupt saves.
+- Size/depth limits for untrusted save input.
+- Representative compatibility fixtures for every supported old format.
+
+Once published as stable, a save version must not change without a migration or an explicit compatibility break.
+
+### Package and execution trust
+
+The v1 `.moon` format is a JSON envelope containing metadata and a virtual file table. File bytes are hex encoded. It is not a ZIP or other archive format despite presenting an archive-like virtual filesystem.
+
+The three supported distribution forms are:
 
 ```text
-build your first Moonroom game tutorial
-DSL reference split by topic
-parser command reference
-save/load model explanation
-testing guide
-authoring cookbook
+source directory   editable author format
+.moon package      portable single-file virtual project
+standalone binary  current Moonroom executable with an embedded .moon payload
 ```
 
-Cookbook examples should include:
+Package paths are relative and may not escape the virtual root. Source packaging rejects symbolic links. Includes use the same relative-root rules in folders and packages.
 
-```text
-locked door
-NPC with topics
-timed event
-hidden item
-openable container
-deterministic random event
-scene transition
-save-compatible puzzle state
+Moonroom games are executable content, not passive documents. Until a hardened sandbox and resource limits exist, users must treat Lua projects and `.moon` files like programs and run only content they trust.
+
+Release hardening must define:
+
+- Available Lua standard libraries and host capabilities.
+- Instruction and memory limits, including infinite-loop handling.
+- Package byte, decoded-file, file-count, and path-length limits.
+- Duplicate virtual-path behavior and malformed-package tests.
+- Asset inclusion and runtime access semantics.
+- Standalone target-platform behavior; standalone builds currently copy the host executable and are not cross-compilation packaging.
+
+A future binary or compressed package format would be a new format version. Minification or Lua bytecode may be convenience features but must never be presented as DRM.
+
+### Frontend boundary
+
+Before `mr-tui`, browser, or JSON clients, define a frontend-neutral session boundary such as:
+
+```rust
+EngineSession::command(input) -> TurnResult
 ```
+
+`TurnResult` should eventually distinguish prose output from structured state and presentation events. The protocol must cover:
+
+- Ordered output blocks.
+- Current room and optional status snapshot.
+- Inventory changes and other observable state changes.
+- Save/load requests without terminal I/O inside the engine.
+- Errors and quit state.
+- Protocol versioning for JSON consumers.
+
+New frontends must consume this boundary rather than parse CLI text or fork engine behavior.
+
+## Quality Contract
+
+Every feature is complete only when it includes, as applicable:
+
+- Core unit tests for state and action rules.
+- Lua integration tests for DSL loading and callbacks.
+- Transcript coverage for author-visible behavior.
+- Save/load and undo coverage for new Rust-owned state.
+- Static validation for invalid author definitions.
+- Updates to `README.md`, `docs/lua-dsl.md`, `.luarc.json`, and templates.
+- `cargo fmt --all --check`, workspace tests, strict Clippy, and example checks.
+
+Robustness work should add:
+
+- Parser fuzz or property tests.
+- Malformed save and package corpora.
+- Path traversal, symbolic-link, duplicate-path, and input-limit tests.
+- Callback-failure rollback tests.
+- Standalone executable smoke tests.
+- Cross-platform CI for supported targets.
+
+## Roadmap
+
+### Milestones 1–6: Foundation — Shipped
+
+Delivered:
+
+- Playable Rust CLI and Lua-authored world loading.
+- Rooms, things, movement, inventory, core actions, flags, counters, callbacks, and custom verbs.
+- Serializable state, deterministic RNG, JSON save/load, and transcript testing.
+- Project templates, examples, documentation, and interactive command history.
+- Containers, supporters, locks, wearables, actors, timers, scenes, and chapters.
+- Multi-file projects with safe local includes.
+
+Hot reload was not delivered and is not implied by foundation status. It remains a separate design task because reloading definitions while preserving Rust-owned state needs compatibility rules for removed or changed rooms, things, callbacks, and events.
+
+### Milestone 7: Parser quality — In progress
+
+Shipped:
+
+- `again` and bounded `undo`.
+- Recent singular-object pronoun resolution.
+- Common verbs including open, close, lock, unlock, read, give, and show.
+- Article-insensitive and normalized object matching.
+
+Remaining:
+
+- Ambiguity detection and disambiguation when multiple reachable things match.
+- A deliberate policy for plural references such as `them`.
+- More context-sensitive parser failures.
+- Property tests for normalization and object resolution.
+
+Done when ambiguous input never silently selects an arbitrary object and the behavior is covered in core, Lua, and transcript tests.
+
+### Milestone 8: Object state — In progress
+
+Shipped:
+
+- Openable containers, lockable things, keys, guarded exits, hidden/revealed things, containers, supporters, and wearables.
+
+Remaining, in recommended order:
+
+1. Scenery things that remain inspectable but do not clutter room listings.
+2. Dark rooms and explicit light sources.
+3. Edible and drinkable things, only if a showcase puzzle demonstrates their value.
+
+Done when each property is Rust-owned, serializable, undoable, statically validated, documented, and exercised by transcript fixtures.
+
+### Milestone 9: Dialogue — In progress
+
+Shipped:
+
+- Actors, talk, topic aliases, topic requirements, ask/tell/show/give callbacks, and actor memory.
+
+Remaining:
+
+- Decide whether multi-step conversation needs a declarative dialogue model or is adequately represented by actor memory and scenes.
+- Do not add `game.choice()` until the engine can suspend an interaction and request structured input through the frontend-neutral session protocol.
+
+Done when a showcase conversation can support a multi-step puzzle without storing required progress in Lua globals.
+
+### Milestone 10: Scenes and chapters — Shipped
+
+Delivered current scene/chapter state, lifecycle hooks, scene-scoped timers, and transcript assertions. Future work here should be driven by a concrete story requirement.
+
+### Milestone 11: Author tooling — In progress
+
+Shipped:
+
+- `moonroom check`, `inspect`, and transcript recording.
+- Validation for world graph errors, object locations, guarded exits, and duplicate vocabulary.
+- Lua source paths in load failures.
+
+Remaining:
+
+- Better DSL-specific source context and actionable diagnostics.
+- Optional warnings distinct from fatal validation errors.
+- Validation of callback/event references where statically possible.
+- Stable machine-readable diagnostics if editor integration is pursued.
+
+Done when common author mistakes are reported before play with a source location, severity, and corrective message.
+
+### Milestone 12: Save hardening — In progress
+
+Shipped versioned envelopes, identity checks, pretty/compact JSON, and legacy raw-state loading.
+
+Remaining work is the save contract described above: atomic writes, corruption handling, explicit game-version policy, real migrations, input limits, and compatibility fixtures.
+
+### Milestone 13: Testing — Shipped, ongoing
+
+Delivered transcript assertions, filtering, golden update mode, seed overrides, command-context failures, and regression fixtures. Robustness and cross-platform testing remain continuous quality work rather than a closed feature milestone.
+
+### Milestone 14: Packaging and distribution — In progress
+
+Shipped folder/package loading, pack/unpack, package-aware play/check/test/inspect, and host-platform standalone builds.
+
+Remaining:
+
+- The package trust and resource limits described above.
+- Installed-release workflow and supported-platform matrix.
+- Release profile and standalone smoke checks.
+- Checksums and versioned release artifacts.
+- Clear project/package versioning documentation.
+
+Done when a user can install Moonroom and run a packaged game on every supported platform without a source checkout.
+
+### Milestone 15: Frontends — Planned
+
+Order:
+
+1. Define and test the frontend-neutral session and structured output boundary.
+2. Add versioned JSON input/output mode for external clients.
+3. Build `mr-tui` only if it materially improves play or author testing.
+4. Consider a browser frontend after the JSON/session contract is stable.
+5. Investigate WASM only after confirming that Lua runtime constraints and package loading are acceptable.
+
+The CLI remains canonical throughout this work.
+
+### Milestone 16: Documentation as product — In progress
+
+Feature documentation is continuous and part of the quality contract. Dedicated remaining deliverables are:
+
+- A first-game tutorial.
+- A parser command reference.
+- A save compatibility and migration guide.
+- A transcript testing guide.
+- A focused cookbook covering locks, NPC topics, timers, hidden objects, containers, deterministic randomness, scenes, and save-compatible puzzle state.
+
+The DSL reference may be split by topic when navigation becomes a real problem; file splitting is not itself a product goal.
+
+### Milestone 17: Engine contract hardening — Next
+
+This is the immediate implementation milestone because later callbacks, dialogue choices, and frontends depend on it.
+
+Work:
+
+1. Consolidate turn advancement and undo ownership across `Game` and `LuaGame`.
+2. Implement the target callback pipeline and transactional rollback.
+3. Add tests for intercepted actions, callback failures, timers, `again`, and undo.
+4. Document the final author-visible behavior in the DSL reference.
+5. Define and document the current Lua trust boundary before accepting third-party packages as safe content.
+
+Done when one component owns command transactions, every error path has deterministic state behavior, and the implementation matches the documented pipeline.
 
 ## Recommended Next Work
 
-Completed from this list:
+Execute in this order:
 
-```text
-multi-file loading, because the planned project shape and showcase scaffold already need it.
-moonroom check, with static validation for world graph errors and duplicate object vocabulary.
-read, with thing-authored read text and on_read callbacks for inspectable clues.
-open, close, lock, and unlock for thing-owned object state, including saved open/locked state and Lua callbacks.
-again and undo, with bounded Rust-owned command history and Lua callback state rollback.
-hidden/revealed things, with saved visibility state and controlled Lua hide/reveal helpers.
-transcript directives for !room, !flag, and !counter state assertions.
-Milestone 9 dialogue basics: topic aliases, flag-gated topic availability, tell/show/give commands, table-form topic callbacks, and Rust-owned actor memory counters.
-Milestone 10 scene/chapter basics: saved current scene/chapter, scene lifecycle hooks, scene-scoped timers, and !scene/!chapter transcript assertions.
-Milestone 11 author tooling basics: moonroom inspect and moonroom transcript recording.
-Milestone 12 save hardening basics: versioned save envelope, game id/version metadata, wrong-game rejection, legacy raw-state loading, and pretty/compact save output.
-Milestone 13 testing improvements: !contains/!not_contains directives, transcript filtering, golden update mode, seed override, command-step failure context, and regression fixture coverage.
-Milestone 14 packaging basics: source folder and .moon GameSource loading, moonroom pack/unpack, play/check/test/inspect package support, standalone executable export with an embedded .moon payload, and package regression fixtures.
-```
+1. Milestone 17: turn, rollback, undo, and timer semantics.
+2. Broader `moonroom check` diagnostics and source context.
+3. Scenery things.
+4. Darkness and light sources.
+5. Parser ambiguity and disambiguation.
+6. Save atomicity, compatibility policy, and migration fixtures.
+7. Package resource limits and malformed-input hardening.
+8. Frontend-neutral session and structured output protocol.
 
-The next implementation pass should prioritize:
-
-```text
-1. broader moonroom check source context and optional warnings as the DSL grows.
-2. scenery things, because they let authors add inspectable detail without cluttering room listings.
-3. light and dark room support, because it unlocks a classic parser-fiction constraint while exercising saved world state.
-```
+Do not start hot reload, `game.choice()`, TUI, browser, or WASM work until their required state-compatibility or frontend protocol contracts are in place.

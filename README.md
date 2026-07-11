@@ -227,5 +227,7 @@ Moonroom is pre-release and changing quickly. The core design goal is stable, se
 
 Near-term roadmap priorities:
 
-- richer object state such as light/dark and scenery
-- broader author tooling such as `moonroom inspect` and transcript recording
+- explicit turn, callback rollback, undo, and timer semantics
+- broader `moonroom check` diagnostics with better source context
+- richer object state such as scenery and light/dark rooms
+- parser ambiguity and disambiguation

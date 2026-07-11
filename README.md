@@ -218,6 +218,11 @@ docs/lua-dsl.md  author-facing Lua DSL reference
 ## Documentation
 
 - [Lua DSL reference](docs/lua-dsl.md)
+- [Your first game](docs/first-game.md)
+- [Parser command reference](docs/parser-reference.md)
+- [Transcript testing guide](docs/transcript-testing.md)
+- [Author cookbook](docs/cookbook.md)
+- [Packaging and save compatibility](docs/packaging-and-saves.md)
 - [Active release plan and architecture contract](PLAN.md)
 - [Long-term roadmap](ROADMAP.md)
 - [Agent notes](AGENTS.md)

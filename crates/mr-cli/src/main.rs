@@ -641,6 +641,14 @@ Run transcript tests:
 ```bash
 moonroom test .
 ```
+
+Moonroom authoring references:
+
+- https://github.com/OldJobobo/moonroom/blob/master/docs/lua-dsl.md
+- https://github.com/OldJobobo/moonroom/blob/master/docs/parser-reference.md
+- https://github.com/OldJobobo/moonroom/blob/master/docs/transcript-testing.md
+- https://github.com/OldJobobo/moonroom/blob/master/docs/cookbook.md
+- https://github.com/OldJobobo/moonroom/blob/master/docs/packaging-and-saves.md
 "#
     )
 }

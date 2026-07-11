@@ -315,7 +315,7 @@ Exit criteria:
 
 Delivered in the 0.1 line: saves write atomically through a synced sibling temporary file and rename. Raw legacy state remains the supported format-0 migration, versioned save envelope 1 is the current compatible format, and compatibility is keyed by game id while game version remains author metadata. Save and package readers reject bounded corrupt input; package limits cover input size, file count, decoded totals, individual file size, path length/depth, duplicate paths, malformed hex, and traversal. Lua remains trusted executable content; these limits are robustness measures, not a sandbox.
 
-### Phase 4: Author documentation (Next)
+### Phase 4: Author documentation (Shipped)
 
 Goal: a new author can build and test a small game without reconstructing behavior from examples.
 
@@ -330,7 +330,9 @@ Exit criteria:
 - The tutorial produces a project accepted by `check` and `test`.
 - Every starter DSL feature links to its authoritative documentation.
 
-### Phase 5: 0.1 release
+Delivered in the 0.1 line: the documentation set now includes a tested first-game walkthrough, parser command reference, transcript guide, focused author cookbook, and package/save compatibility guide. The README links each guide alongside the DSL reference.
+
+### Phase 5: 0.1 release (Next)
 
 Goal: ship one supported release path and a polished proof game.
 

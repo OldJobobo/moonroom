@@ -223,6 +223,7 @@ docs/lua-dsl.md  author-facing Lua DSL reference
 - [Transcript testing guide](docs/transcript-testing.md)
 - [Author cookbook](docs/cookbook.md)
 - [Packaging and save compatibility](docs/packaging-and-saves.md)
+- [Release and installation guide](docs/releasing.md)
 - [Active release plan and architecture contract](PLAN.md)
 - [Long-term roadmap](ROADMAP.md)
 - [Agent notes](AGENTS.md)

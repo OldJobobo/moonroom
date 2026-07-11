@@ -17,9 +17,9 @@ Moonroom is pre-release but already usable from the command line.
 | Rust-owned save/load | Shipped, compatibility work remains |
 | Transcript testing | Shipped |
 | Author inspection and validation | Shipped, diagnostics can grow |
-| `.moon` packages and standalone builds | Shipped, release hardening remains |
+| `.moon` packages and standalone builds | Shipped |
 | Advanced object state | In progress |
-| Parser disambiguation | Planned |
+| Parser disambiguation | Shipped |
 | Frontend-neutral session protocol | Planned |
 | TUI and browser frontends | Later |
 
@@ -332,7 +332,7 @@ Exit criteria:
 
 Delivered in the 0.1 line: the documentation set now includes a tested first-game walkthrough, parser command reference, transcript guide, focused author cookbook, and package/save compatibility guide. The README links each guide alongside the DSL reference.
 
-### Phase 5: 0.1 release (Next)
+### Phase 5: 0.1 release (Shipped)
 
 Goal: ship one supported release path and a polished proof game.
 
@@ -348,6 +348,8 @@ Exit criteria:
 - The showcase passes static checks and all transcripts from both its source tree and packaged form.
 - A fresh user can install Moonroom, create the starter, test it, package it, and run it on each supported platform.
 - Release artifacts are reproducible enough to identify their source revision and verify integrity.
+
+Delivered in the 0.1 line: Linux x86_64 is the initial supported host. CI runs formatting, strict Clippy, workspace tests, source-game checks, package round-trips, standalone smoke tests, and the clean starter workflow. `scripts/release-artifacts.sh VERSION` produces versioned CLI, showcase package, standalone showcase, and SHA-256 checksums after the same gate. The House Under Glass passes from source and package form.
 
 ## Scope Rules
 
